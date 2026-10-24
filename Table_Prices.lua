@@ -9,8 +9,10 @@ ffi.cdef[[
     int ShellExecuteA(void* hwnd, const char* op, const char* file, const char* params, const char* dir, int show);
 ]]
 local shell32 = ffi.load('shell32')
+local pending_url = nil
+-- ссылка открывается не прямо из кадра отрисовки (это могло ронять игру), а из основного потока
 local function open_url(url)
-    shell32.ShellExecuteA(nil, "open", url, nil, nil, 1)
+    pending_url = url
 end
 
 local main_window = imgui.new.bool(false) 
@@ -923,6 +925,234 @@ clock_frame = imgui.OnFrame(
     end
 )
 
+-- ===================== Автообновление (скрипт и цены) =====================
+local SCRIPT_VERSION = "1.1"
+local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
+local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
+local cfg_dir = getWorkingDirectory() .. "\\config\\"
+local state_path = cfg_dir .. "arizona_prices_state.json"
+local state = { prices_sig = "", auto_prices = true }
+local update_info = { available = false, version = "", busy = false, status = "" }
+local dl_done = {}
+local need_reload = false
+local manual_check = false
+local busy_since = 0
+
+local ok_moon, moon = pcall(require, 'moonloader')
+local dlstatus = ok_moon and moon.download_status or nil
+
+local function read_file(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local c = f:read("*a")
+    f:close()
+    return c
+end
+
+local function write_file(path, content)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    f:write(content)
+    f:close()
+    return true
+end
+
+local function load_state()
+    local c = read_file(state_path)
+    if c then
+        local ok, d = pcall(decodeJson, c)
+        if ok and type(d) == "table" then
+            if type(d.prices_sig) == "string" then state.prices_sig = d.prices_sig end
+            if d.auto_prices == false then state.auto_prices = false end
+        end
+    end
+end
+
+local function save_state()
+    if not doesDirectoryExist(cfg_dir) then createDirectory(cfg_dir) end
+    write_file(state_path, encodeJson(state))
+end
+
+load_state()
+
+local auto_prices_cb = imgui.new.bool(state.auto_prices)
+
+local function version_newer(remote, current)
+    local a, b = {}, {}
+    for n in tostring(remote):gmatch("%d+") do a[#a + 1] = tonumber(n) end
+    for n in tostring(current):gmatch("%d+") do b[#b + 1] = tonumber(n) end
+    for i = 1, math.max(#a, #b) do
+        local x, y = a[i] or 0, b[i] or 0
+        if x ~= y then return x > y end
+    end
+    return false
+end
+
+local function signature(s)
+    local sum = 0
+    for i = 1, #s do sum = (sum * 31 + s:byte(i)) % 4294967291 end
+    return #s .. ":" .. sum
+end
+
+-- скачивание: сам колбэк только ставит флаг, всю работу делает основной поток
+local function fetch(name, dest, flag)
+    os.remove(dest)
+    if not dlstatus or not downloadUrlToFile then
+        update_info.status = "Загрузка недоступна"
+        return false
+    end
+    local url = UPDATE_BASE .. name .. "?t=" .. os.time()
+    local ok = pcall(downloadUrlToFile, url, dest, function(id, status, p1, p2)
+        if status == dlstatus.STATUSEX_ENDDOWNLOAD then
+            dl_done[flag] = true
+        end
+    end)
+    return ok
+end
+
+local function start_checks()
+    if not doesDirectoryExist(cfg_dir) then createDirectory(cfg_dir) end
+    fetch("version.txt", cfg_dir .. "arizona_prices_remote_version.txt", "version")
+    if state.auto_prices then
+        fetch("item_prices.json", cfg_dir .. "arizona_prices_remote.json", "prices")
+    end
+end
+
+local function handle_version()
+    local path = cfg_dir .. "arizona_prices_remote_version.txt"
+    local c = read_file(path)
+    os.remove(path)
+    local v = c and c:match("%d[%d%.]*")
+    if v and version_newer(v, SCRIPT_VERSION) then
+        if not update_info.available then
+            sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Вышла новая версия {33AAFF}" .. v .. "{FFFFFF}! Откройте /prices и нажмите «Обновить»."), -1)
+        end
+        update_info.available = true
+        update_info.version = v
+        update_info.status = ""
+    elseif manual_check then
+        update_info.status = v and "У вас последняя версия" or "Не удалось проверить"
+    end
+    manual_check = false
+end
+
+local function handle_script()
+    local dest = cfg_dir .. "arizona_prices_update.lua"
+    local c = read_file(dest)
+    update_info.busy = false
+    if not c or #c < 2000 then
+        update_info.status = "Ошибка загрузки"
+        return
+    end
+    if not loadstring(c) then
+        update_info.status = "Файл повреждён"
+        return
+    end
+    local cur = thisScript().path
+    local old = read_file(cur)
+    if old then write_file(cfg_dir .. "Table_Prices.lua.bak", old) end
+    if write_file(cur, c) then
+        os.remove(dest)
+        update_info.status = "Готово, перезапуск..."
+        need_reload = true
+    else
+        update_info.status = "Не удалось записать файл"
+    end
+end
+
+local function handle_prices()
+    local path = cfg_dir .. "arizona_prices_remote.json"
+    local c = read_file(path)
+    os.remove(path)
+    if not c or #c < 2 then return end
+    local sig = signature(c)
+    if sig == state.prices_sig then return end
+    local ok, remote = pcall(decodeJson, c)
+    if not ok or type(remote) ~= "table" then return end
+    local index = {}
+    for i, it in ipairs(items_list) do
+        if it.item then index[it.item] = i end
+    end
+    local added, changed = 0, 0
+    for _, r in ipairs(remote) do
+        local buy = type(r) == "table" and tonumber(r.buy) or nil
+        local sell = type(r) == "table" and tonumber(r.sell) or nil
+        if buy and sell and type(r.item) == "string" then
+            local i = index[r.item]
+            if i then
+                local l = items_list[i]
+                if tonumber(l.buy) ~= buy or tonumber(l.sell) ~= sell then
+                    l.buy, l.sell = buy, sell
+                    changed = changed + 1
+                end
+            else
+                items_list[#items_list + 1] = { item = r.item, buy = buy, sell = sell }
+                index[r.item] = #items_list
+                added = added + 1
+            end
+        end
+    end
+    state.prices_sig = sig
+    save_state()
+    if added + changed > 0 then
+        save_data()
+        sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Цены обновлены: новых " .. added .. ", изменено " .. changed .. "."), -1)
+    end
+end
+
+local function process_updates()
+    if dl_done.version then dl_done.version = nil; pcall(handle_version) end
+    if dl_done.script then dl_done.script = nil; pcall(handle_script) end
+    if dl_done.prices then dl_done.prices = nil; pcall(handle_prices) end
+    if update_info.busy and os.time() - busy_since > 40 then
+        update_info.busy = false
+        update_info.status = "Не удалось скачать"
+    end
+end
+
+local outdated_popup = imgui.new.bool(false)
+
+local function start_update()
+    update_info.busy = true
+    update_info.status = ""
+    busy_since = os.time()
+    if not fetch("Table_Prices.lua", cfg_dir .. "arizona_prices_update.lua", "script") then
+        update_info.busy = false
+        if update_info.status == "" then update_info.status = "Ошибка загрузки" end
+    end
+end
+
+local function draw_update_block()
+    imgui.SetCursorPos(imgui.ImVec2(5, 340))
+    imgui.TextDisabled("Версия " .. SCRIPT_VERSION)
+    imgui.SetCursorPosX(5)
+    if update_info.available then
+        imgui.TextColored(imgui.ImVec4(0.45, 1.00, 0.55, 1.00), "Вышла версия " .. update_info.version)
+        imgui.SetCursorPosX(5)
+        if update_info.busy then
+            imgui.TextDisabled("Скачивание...")
+        elseif imgui.Button(ic("DOWNLOAD", "") .. " Обновить##do_update", imgui.ImVec2(SIDEBAR_W - 10, 32)) then
+            start_update()
+        end
+    else
+        if imgui.Button(ic("ARROWS_ROTATE", "") .. " Проверить##check_update", imgui.ImVec2(SIDEBAR_W - 10, 28)) then
+            manual_check = true
+            update_info.status = "Проверка..."
+            start_checks()
+        end
+    end
+    if update_info.status ~= "" then
+        imgui.SetCursorPosX(5)
+        imgui.TextDisabled(update_info.status)
+    end
+    imgui.SetCursorPosX(5)
+    if imgui.Checkbox(" Автообновление цен##auto_prices", auto_prices_cb) then
+        state.auto_prices = auto_prices_cb[0]
+        save_state()
+        if state.auto_prices then start_checks() end
+    end
+end
+
 local function draw_extra_tab(id)
     if id == 3 then
         draw_payday_tab()
@@ -985,6 +1215,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 sidebar_tab(ic("COMMENT_DOTS", "") .. " Фразы", 4)
                 sidebar_tab(ic("GLOBE", "") .. " Время стран", 6)
                 sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5)
+                draw_update_block()
 
                 -- Правая часть (содержимое выбранной вкладки)
                 imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W, 0))
@@ -1327,15 +1558,85 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
     end
 )
 
+-- ===================== Большое окно «старая версия» =====================
+imgui.OnFrame(function() return outdated_popup[0] end, function()
+    local sw, sh = getScreenResolution()
+    imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(580, 290), imgui.Cond.Always)
+    imgui.SetNextWindowFocus()
+    local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoMove,
+        imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
+    imgui.Begin("##outdated_window", nil, flags)
+    local p = imgui.GetWindowPos()
+    imgui.GetWindowDrawList():AddRectFilled(p, imgui.ImVec2(p.x + 580, p.y + 5), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1.00, 0.75, 0.15, 1.00)))
+
+    imgui.SetCursorPos(imgui.ImVec2(24, 28))
+    imgui.SetWindowFontScale(1.9)
+    imgui.TextColored(imgui.ImVec4(1.00, 0.80, 0.20, 1.00), ic("TRIANGLE_EXCLAMATION", "") .. " Внимание!")
+    imgui.SetWindowFontScale(1.0)
+
+    imgui.SetCursorPos(imgui.ImVec2(24, 90))
+    imgui.SetWindowFontScale(1.3)
+    imgui.PushTextWrapPos(556)
+    imgui.TextWrapped("У вас старая версия скрипта. Обновите для комфортного использования.")
+    imgui.PopTextWrapPos()
+    imgui.SetWindowFontScale(1.0)
+
+    imgui.SetCursorPos(imgui.ImVec2(24, 160))
+    imgui.TextDisabled("Ваша версия: " .. SCRIPT_VERSION .. "    Новая версия: " .. update_info.version)
+    if update_info.status ~= "" then
+        imgui.SetCursorPosX(24)
+        imgui.TextDisabled(update_info.status)
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(24, 290 - 24 - 44))
+    local half = (580 - 48 - 10) / 2
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.18, 0.45, 0.85, 1.00))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.22, 0.52, 0.92, 1.00))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.15, 0.38, 0.75, 1.00))
+    if update_info.busy then
+        imgui.Button("Скачивание...##outdated_busy", imgui.ImVec2(half, 44))
+    elseif imgui.Button(ic("DOWNLOAD", "") .. " Обновить##outdated_update", imgui.ImVec2(half, 44)) then
+        start_update()
+    end
+    imgui.PopStyleColor(3)
+    imgui.SameLine()
+    if imgui.Button(fa.CIRCLE_XMARK .. " Закрыть##outdated_close", imgui.ImVec2(half, 44)) then
+        outdated_popup[0] = false
+    end
+    imgui.End()
+end)
+
 function main() 
     while not isSampAvailable() do wait(0) end 
     load_data() 
     
     sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices V2.0] {FFFFFF}Скрипт успешно загружен! Для активации - {33AAFF}/prices{FFFFFF}. ТГК - {33AAFF}@arizona_prices"), -1)
     
-    sampRegisterChatCommand('prices', function() 
-        main_window[0] = not main_window[0] 
+    sampRegisterChatCommand('prices', function()
+        main_window[0] = not main_window[0]
+        if main_window[0] and update_info.available then
+            outdated_popup[0] = true
+        end
     end)
     
-    wait(-1)
+    local next_check = os.time() + 5
+    while true do
+        wait(100)
+        if pending_url then
+            local url = pending_url
+            pending_url = nil
+            pcall(function() shell32.ShellExecuteA(nil, "open", url, nil, nil, 1) end)
+        end
+        process_updates()
+        if os.time() >= next_check then
+            next_check = os.time() + CHECK_EVERY
+            pcall(start_checks)
+        end
+        if need_reload then
+            need_reload = false
+            wait(700)
+            thisScript():reload()
+        end
+    end
 end
