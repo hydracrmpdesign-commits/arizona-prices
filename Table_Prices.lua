@@ -926,7 +926,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.1"
+local SCRIPT_VERSION = "1.2"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -976,6 +976,8 @@ end
 load_state()
 
 local auto_prices_cb = imgui.new.bool(state.auto_prices)
+local outdated_popup = imgui.new.bool(false)
+local prev_main_open = false
 
 local function version_newer(remote, current)
     local a, b = {}, {}
@@ -1030,6 +1032,7 @@ local function handle_version()
         update_info.available = true
         update_info.version = v
         update_info.status = ""
+        if main_window[0] then outdated_popup[0] = true end
     elseif manual_check then
         update_info.status = v and "У вас последняя версия" or "Не удалось проверить"
     end
@@ -1109,8 +1112,6 @@ local function process_updates()
         update_info.status = "Не удалось скачать"
     end
 end
-
-local outdated_popup = imgui.new.bool(false)
 
 local function start_update()
     update_info.busy = true
@@ -1559,7 +1560,14 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
 )
 
 -- ===================== Большое окно «старая версия» =====================
-imgui.OnFrame(function() return outdated_popup[0] end, function()
+imgui.OnFrame(function()
+    local open = main_window[0]
+    if open and not prev_main_open and update_info.available then
+        outdated_popup[0] = true
+    end
+    prev_main_open = open
+    return outdated_popup[0]
+end, function()
     local sw, sh = getScreenResolution()
     imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
     imgui.SetNextWindowSize(imgui.ImVec2(580, 290), imgui.Cond.Always)
@@ -1578,7 +1586,7 @@ imgui.OnFrame(function() return outdated_popup[0] end, function()
     imgui.SetCursorPos(imgui.ImVec2(24, 90))
     imgui.SetWindowFontScale(1.3)
     imgui.PushTextWrapPos(556)
-    imgui.TextWrapped("У вас старая версия скрипта. Обновите для комфортного использования.")
+    imgui.TextWrapped("Внимание, у вас старая версия скрипта, обновите для комфортного использования.")
     imgui.PopTextWrapPos()
     imgui.SetWindowFontScale(1.0)
 
@@ -1615,9 +1623,6 @@ function main()
     
     sampRegisterChatCommand('prices', function()
         main_window[0] = not main_window[0]
-        if main_window[0] and update_info.available then
-            outdated_popup[0] = true
-        end
     end)
     
     local next_check = os.time() + 5
