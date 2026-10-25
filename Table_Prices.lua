@@ -303,8 +303,137 @@ local function accent_vec(mult, alpha)
 end
 
 -- ===================== Оформление: цвета, рамка с переливами, тень =====================
+-- ===================== Анимации интерфейса =====================
+-- Всё лежит в одной таблице ANIM (так не расходуются локальные переменные скрипта).
+-- ANIM.a - текущая прозрачность (окно -> вкладка -> строка таблицы). Её учитывает col32 и ручная отрисовка,
+-- а для обычных элементов ImGui она же ставится через PushStyleVar(Alpha).
+-- Скорость и «мягкость» анимаций меняются числами в этой таблице.
+local ANIM = {
+    a = 1, stack = {}, dt = 0.016,
+    OPEN_TIME = 0.22,   -- сек: появление окна
+    CLOSE_TIME = 0.16,  -- сек: исчезновение окна
+    MIN_SCALE = 0.95,   -- с какого размера «вырастает» окно (1.0 = без увеличения)
+    TAB_TIME = 0.24,    -- сек: смена вкладки
+    TAB_SHIFT = 22,     -- px: на сколько содержимое вкладки «выезжает» справа
+    ROW_TIME = 0.22,    -- сек: появление одной строки таблицы
+    ROW_STEP = 0.03,    -- сек: задержка между соседними строками (каскад)
+    ROW_MAX = 0.42,     -- сек: максимум общей задержки (чтобы длинный список не тянулся)
+    ROW_SHIFT = 18,     -- px: на сколько строка «подъезжает» слева
+    STRIP_SPEED = 14,   -- скорость движения полоски активной вкладки
+    t = 0, e = 0, opened = false, settle = false,
+    cx = nil, cy = nil, tw = nil, th = nil,
+    tab = nil, tab_t = 1,
+    strip_ty = nil, strip_x = 7, strip_y = nil,
+    rows_t0 = 0, rows_key = nil,
+}
+
+function ANIM.ease(x)
+    if x <= 0 then return 0 elseif x >= 1 then return 1 end
+    local k = 1 - x
+    return 1 - k * k * k
+end
+
+-- вызывается каждый кадр: двигает прогресс окна и ловит смену вкладки; возвращает false, когда окно полностью скрыто
+function ANIM.update(open, tab)
+    local dt = 0.016
+    local ok, v = pcall(function() return imgui.GetIO().DeltaTime end)
+    if ok and type(v) == "number" and v > 0 then dt = math.min(v, 0.05) end
+    ANIM.dt = dt
+    if open then
+        if not ANIM.opened then
+            ANIM.opened = true
+            ANIM.rows_t0 = os.clock() + 0.08
+        end
+        ANIM.t = math.min(1, ANIM.t + dt / ANIM.OPEN_TIME)
+    else
+        ANIM.opened = false
+        ANIM.t = math.max(0, ANIM.t - dt / ANIM.CLOSE_TIME)
+    end
+    local x = ANIM.t
+    ANIM.e = x * x * (3 - 2 * x)
+    if ANIM.tab ~= tab then
+        if ANIM.tab ~= nil and open then
+            ANIM.tab_t = 0
+            ANIM.rows_t0 = os.clock() + 0.05
+        end
+        ANIM.tab = tab
+    end
+    ANIM.tab_t = math.min(1, ANIM.tab_t + dt / ANIM.TAB_TIME)
+    return ANIM.t > 0
+end
+
+-- размер и позиция окна на время анимации: окно растёт от центра, настоящий размер хранится в ANIM.tw / ANIM.th
+function ANIM.place(sw, sh, e)
+    ANIM.cx = ANIM.cx or sw / 2
+    ANIM.cy = ANIM.cy or sh / 2
+    ANIM.tw = ANIM.tw or math.max(700, tonumber(UI_CFG.win_w) or 835)
+    ANIM.th = ANIM.th or math.max(400, tonumber(UI_CFG.win_h) or 500)
+    local s = ANIM.MIN_SCALE + (1 - ANIM.MIN_SCALE) * e
+    local w, h = ANIM.tw * s, ANIM.th * s
+    imgui.SetNextWindowPos(imgui.ImVec2(ANIM.cx - w / 2, ANIM.cy - h / 2), imgui.Cond.Always)
+    imgui.SetNextWindowSize(imgui.ImVec2(w, h), imgui.Cond.Always)
+    pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(1, 1), imgui.ImVec2(math.max(700, sw - 20, w), math.max(400, sh - 20, h)))
+end
+
+-- умножает прозрачность на f (и для виджетов ImGui, и для ручной отрисовки)
+function ANIM.push(f)
+    local prev = ANIM.a
+    ANIM.stack[#ANIM.stack + 1] = prev
+    ANIM.a = prev * f
+    imgui.PushStyleVar(imgui.StyleVar.Alpha, ANIM.a)
+end
+
+function ANIM.pop()
+    local prev = table.remove(ANIM.stack)
+    if prev then ANIM.a = prev end
+    imgui.PopStyleVar()
+end
+
+-- при ошибке в кадре возвращаем всё в исходное состояние
+function ANIM.reset()
+    while #ANIM.stack > 0 do
+        table.remove(ANIM.stack)
+        pcall(imgui.PopStyleVar)
+    end
+    ANIM.a = 1
+    ANIM.t, ANIM.e, ANIM.opened, ANIM.settle = 0, 0, false, false
+end
+
+-- прогресс появления строки таблицы с номером ri (0..1); строки идут каскадом
+function ANIM.row(ri)
+    local age = os.clock() - ANIM.rows_t0 - math.min((ri - 1) * ANIM.ROW_STEP, ANIM.ROW_MAX)
+    return ANIM.ease(age / ANIM.ROW_TIME)
+end
+
+-- сменился поиск или сортировка - каскад начинается заново
+function ANIM.rows_check(key)
+    if key ~= ANIM.rows_key then
+        if ANIM.rows_key ~= nil then ANIM.rows_t0 = os.clock() end
+        ANIM.rows_key = key
+    end
+end
+
+-- полоска слева от активной вкладки: плавно «едет» к новой вкладке (чем дальше ехать, тем сильнее вытягивается)
+function ANIM.draw_strip()
+    if not ANIM.strip_ty then return end
+    if not ANIM.strip_y then ANIM.strip_y = ANIM.strip_ty end
+    local diff = ANIM.strip_ty - ANIM.strip_y
+    if math.abs(diff) < 0.25 then
+        ANIM.strip_y = ANIM.strip_ty
+        diff = 0
+    else
+        ANIM.strip_y = ANIM.strip_y + diff * (1 - math.exp(-ANIM.dt * ANIM.STRIP_SPEED))
+        diff = ANIM.strip_ty - ANIM.strip_y
+    end
+    local wp = imgui.GetWindowPos()
+    local x, y = wp.x + ANIM.strip_x, wp.y + ANIM.strip_y
+    local half = 13 + math.min(math.abs(diff) * 0.2, 12)
+    imgui.GetWindowDrawList():AddRectFilled(imgui.ImVec2(x, y - half), imgui.ImVec2(x + 3, y + half),
+        imgui.ColorConvertFloat4ToU32(accent_vec(1.15, ANIM.a)), 2)
+end
+
 local function col32(r, g, b, a)
-    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a))
+    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, (a or 1) * ANIM.a))
 end
 
 local function hsv_to_rgb(h, s, v)
@@ -815,7 +944,7 @@ end
 
 local function draw_sidebar_bg(wpos)
     local dl = imgui.GetWindowDrawList()
-    local col = imgui.ColorConvertFloat4ToU32(dark(0.088, 1.0))
+    local col = imgui.ColorConvertFloat4ToU32(dark(0.088, ANIM.a))
     dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col, 12)
     dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col)
     dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h - 8), imgui.GetColorU32(imgui.Col.Separator), 1.0)
@@ -833,9 +962,11 @@ local function sidebar_tab(label, id)
     imgui.SetWindowFontScale(1.0)
     if active then
         imgui.PopStyleColor(1)
+        -- сама полоска рисуется в ANIM.draw_strip(): она плавно едет к активной вкладке
         local rmin, rmax = imgui.GetItemRectMin(), imgui.GetItemRectMax()
-        local mid = (rmin.y + rmax.y) / 2
-        imgui.GetWindowDrawList():AddRectFilled(imgui.ImVec2(rmin.x + 2, mid - 13), imgui.ImVec2(rmin.x + 5, mid + 13), imgui.ColorConvertFloat4ToU32(accent_vec(1.15)), 2)
+        local wp = imgui.GetWindowPos()
+        ANIM.strip_ty = (rmin.y + rmax.y) / 2 - wp.y
+        ANIM.strip_x = rmin.x + 2 - wp.x
     end
 end
 
@@ -1532,7 +1663,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.5"
+local SCRIPT_VERSION = "2.6"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2320,24 +2451,37 @@ local function layout_update(wsz)
     end
 end
 
-imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
+imgui.OnFrame(function() return main_window[0] or modal_window[0] or ANIM.t > 0 end,
     guard_frame("menu", function(player)
-        if main_window[0] then 
+        if ANIM.update(main_window[0], current_tab) then
             local sw, sh = getScreenResolution()
-            imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5)) 
-            if LAYOUT.force then
-                LAYOUT.force = false
-                imgui.SetNextWindowSize(imgui.ImVec2(835, 500), imgui.Cond.Always)
-            elseif LAYOUT.req then
-                imgui.SetNextWindowSize(imgui.ImVec2(LAYOUT.req.w, LAYOUT.req.h), imgui.Cond.Always)
-                LAYOUT.req = nil
+            local animating = ANIM.t < 1
+            if animating or ANIM.settle then
+                -- окно открывается/закрывается: растёт от центра; последний кадр ставит точный размер
+                ANIM.place(sw, sh, animating and ANIM.e or 1)
+                ANIM.settle = animating
             else
-                imgui.SetNextWindowSize(imgui.ImVec2(UI_CFG.win_w, UI_CFG.win_h), imgui.Cond.FirstUseEver)
+                imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5)) 
+                if LAYOUT.force then
+                    LAYOUT.force = false
+                    imgui.SetNextWindowSize(imgui.ImVec2(835, 500), imgui.Cond.Always)
+                elseif LAYOUT.req then
+                    imgui.SetNextWindowSize(imgui.ImVec2(LAYOUT.req.w, LAYOUT.req.h), imgui.Cond.Always)
+                    LAYOUT.req = nil
+                else
+                    imgui.SetNextWindowSize(imgui.ImVec2(UI_CFG.win_w, UI_CFG.win_h), imgui.Cond.FirstUseEver)
+                end
+                pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
             end
-            pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
-            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
-                layout_update(imgui.GetWindowSize())
+            ANIM.push(ANIM.e)
+            if imgui.Begin(u8("Arizona Prices##main_window"), ANIM.opened and main_window or nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
+                local cur_sz = imgui.GetWindowSize()
                 local wpos = imgui.GetWindowPos()
+                if ANIM.t >= 1 then
+                    -- окно «на месте»: запоминаем центр и настоящий размер для следующей анимации
+                    ANIM.cx, ANIM.cy, ANIM.tw, ANIM.th = wpos.x + cur_sz.x / 2, wpos.y + cur_sz.y / 2, cur_sz.x, cur_sz.y
+                end
+                layout_update((ANIM.t < 1 and ANIM.tw) and imgui.ImVec2(ANIM.tw, ANIM.th) or cur_sz)
                 local win_cx, win_cy = wpos.x + LAYOUT.w / 2, wpos.y + LAYOUT.h / 2
                 hk.typing = imgui.GetIO().WantTextInput
 
@@ -2351,10 +2495,13 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 sidebar_tab(ic("GLOBE", "") .. " Время стран", 6)
                 sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5)
                 sidebar_tab(ic("GEAR", "") .. " Настройки", 7)
+                ANIM.draw_strip()
                 draw_update_block()
 
                 -- Правая часть (содержимое выбранной вкладки)
-                imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W, 0))
+                local tab_e = ANIM.ease(ANIM.tab_t)
+                imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W + (1 - tab_e) * ANIM.TAB_SHIFT, 0))
+                if tab_e < 1 then ANIM.push(tab_e) end
                 local content_flags = imgui.WindowFlags.AlwaysUseWindowPadding or 0
                 if not (current_tab == 2 and (LAYOUT.h < 495 or LAYOUT.w < 830)) then
                     content_flags = bit.bor(content_flags, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)
@@ -2463,9 +2610,13 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         table.sort(display_indices, function(a, b) local name_a = (items_list[a].item or ""):lower() local name_b = (items_list[b].item or ""):lower() return name_a < name_b end)
                     end
 
+                    ANIM.rows_check(search_query .. "|" .. current_sort[0])
                     for ri, idx in ipairs(display_indices) do 
                         local item = items_list[idx]
                         if item then 
+                            local row_e = ANIM.row(ri)
+                            local row_dx = (1 - row_e) * ANIM.ROW_SHIFT
+                            if row_e < 1 then ANIM.push(row_e) end
                             local row_y = imgui.GetCursorPosY() 
                             do
                                 local rp = imgui.GetCursorScreenPos()
@@ -2500,13 +2651,14 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                     truncated = truncated:sub(1, pos - 1)
                                 end
                                 truncated = truncated .. "..." 
+                                imgui.SetCursorPosX(imgui.GetCursorPosX() + row_dx)
                                 imgui.Text(truncated) 
                                 if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end 
-                                imgui.SameLine(col_w0 - icon_w - 6) 
+                                imgui.SameLine(col_w0 - icon_w - 6 + row_dx) 
                                 imgui.Text(FA.CIRCLE_QUESTION) 
                                 if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end
                             else 
-                                imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w0 - sz.x) * 0.5)) 
+                                imgui.SetCursorPosX(imgui.GetCursorPosX() + row_dx + math.max(0, (col_w0 - sz.x) * 0.5)) 
                                 imgui.Text(item_text)
                             end
 
@@ -2514,7 +2666,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                             do 
                                 local sz = imgui.CalcTextSize(format_price(item.buy))
                                 imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
-                                imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w1 - sz.x) * 0.5)) 
+                                imgui.SetCursorPosX(imgui.GetCursorPosX() + row_dx + math.max(0, (col_w1 - sz.x) * 0.5)) 
                                 imgui.TextColored(imgui.ImVec4(0.55, 0.92, 0.65, 1.0), format_price(item.buy))
                             end
 
@@ -2524,10 +2676,10 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 local sale_text = format_price(item.sell) 
                                 local sz = imgui.CalcTextSize(sale_text)
                                 imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
-                                imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w2 - sz.x - 20) * 0.5)) 
+                                imgui.SetCursorPosX(imgui.GetCursorPosX() + row_dx + math.max(0, (col_w2 - sz.x - 20) * 0.5)) 
                                 imgui.TextColored(imgui.ImVec4(1.0, 0.85, 0.45, 1.0), sale_text)
                                 local icon_w = imgui.CalcTextSize(FA.BADGE_PERCENT).x 
-                                imgui.SameLine(col_w2 - icon_w - 6) 
+                                imgui.SameLine(col_w2 - icon_w - 6 + row_dx) 
                                 imgui.Text(FA.BADGE_PERCENT)
                                 if imgui.IsItemHovered() then 
                                     imgui.SetTooltip("1%% - " .. format_price(math.floor(sale_value * 0.99 + 0.5)) .. "\n" .. "3%% - " .. format_price(math.floor(sale_value * 0.97 + 0.5)) .. "\n" .. "4%% - " .. format_price(math.floor(sale_value * 0.96 + 0.5)) .. "\n" .. "5%% - " .. format_price(math.floor(sale_value * 0.95 + 0.5))) 
@@ -2537,7 +2689,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                             imgui.NextColumn()
                             local buttons_total_width = 28 + 5 + 28 
                             imgui.SetCursorPosY(row_y) 
-                            imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - buttons_total_width) * 0.5))
+                            imgui.SetCursorPosX(imgui.GetCursorPosX() + row_dx + math.max(0, (col_w3 - buttons_total_width) * 0.5))
                             
                             if imgui.Button(FA.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
                                 open_edit_modal(idx) 
@@ -2552,6 +2704,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                             imgui.NextColumn() 
                             imgui.Separator() 
                             table_bottom_y = imgui.GetCursorScreenPos().y - separator_spacing - 1.0
+                            if row_e < 1 then ANIM.pop() end
                         end
                     end
                     imgui.Columns(1)
@@ -2721,14 +2874,16 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
                 if content_visible then pcall(draw_resize_grip) end
                 imgui.EndChild()
+                if tab_e < 1 then ANIM.pop() end
 
-                draw_window_fx(wpos.x, wpos.y, wpos.x + LAYOUT.w, wpos.y + LAYOUT.h)
+                draw_window_fx(wpos.x, wpos.y, wpos.x + cur_sz.x, wpos.y + cur_sz.y)
                 imgui.End()
             else
                 imgui.End()
             end
+            ANIM.pop()
         end
-    end, function() main_window[0] = false; modal_window[0] = false; hk.binding = false end)
+    end, function() ANIM.reset(); main_window[0] = false; modal_window[0] = false; hk.binding = false end)
 )
 
 -- ===================== Большое окно «старая версия» =====================
