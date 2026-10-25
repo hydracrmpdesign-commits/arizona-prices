@@ -1162,7 +1162,6 @@ local function draw_payday_tab()
     section_header(ic("CLOCK", ""), "Отчет до PayDay")
     if imgui.BeginChild("##payday_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
         imgui.SetWindowFontScale(1.35)
-        imgui.PushStyleVar(imgui.StyleVar.FramePadding, imgui.ImVec2(10, 8))
         imgui.TextWrapped("На экране появится надпись «До PayDay: N мин N сек». PayDay выплачивается каждые 30 минут: в :00 и :30.")
         imgui.Spacing()
         if imgui.Checkbox(" Включить", payday_on) then
@@ -1192,7 +1191,6 @@ local function draw_payday_tab()
         end
         imgui.Spacing()
         imgui.TextDisabled("Сейчас: " .. payday_text())
-        imgui.PopStyleVar(1)
         imgui.SetWindowFontScale(1.0)
     end
     imgui.EndChild()
@@ -1201,7 +1199,6 @@ end
 local function draw_phrases_tab()
     section_header(ic("COMMENT_DOTS", ""), "Фразы для автоотправки")
     imgui.SetWindowFontScale(1.3)
-    imgui.PushStyleVar(imgui.StyleVar.FramePadding, imgui.ImVec2(10, 9))
     imgui.SetNextItemWidth(imgui.GetContentRegionAvail().x - 190)
     local enter = imgui.InputTextWithHint("##phrase_input", "Введи фразу или команду (например /time)", phrase_buf, ffi.sizeof(phrase_buf), imgui.InputTextFlags.EnterReturnsTrue)
     imgui.SameLine()
@@ -1241,7 +1238,6 @@ local function draw_phrases_tab()
         end
     end
     imgui.EndChild()
-    imgui.PopStyleVar(1)
     imgui.SetWindowFontScale(1.0)
 end
 
@@ -1533,7 +1529,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.0"
+local SCRIPT_VERSION = "2.1"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2551,7 +2547,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     draw_extra_tab(current_tab)
                 end
                 end
-                if content_visible then draw_resize_grip() end
+                if content_visible then pcall(draw_resize_grip) end
                 imgui.EndChild()
 
                 draw_window_fx(wpos.x, wpos.y, wpos.x + LAYOUT.w, wpos.y + LAYOUT.h)
