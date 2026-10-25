@@ -509,6 +509,7 @@ local calc_expr = ""
 local calc_prev = ""
 local calc_error = nil
 local calc_fresh = false
+local CALCFX = { hover = {}, press = {}, ripple = {}, hist = {}, hist_open = false, pop_t = -10, grown = false }
 
 local function ic(name, fallback)
     return fa[name] or fallback
@@ -801,9 +802,13 @@ local function calc_equals()
         calc_error = err or "Ошибка"
         return
     end
-    calc_prev = calc_format_expr(calc_expr) .. " ="
+    local shown_expr = calc_format_expr(calc_expr)
+    calc_prev = shown_expr .. " ="
     calc_expr = calc_raw_number(res)
     calc_fresh = true
+    CALCFX.pop_t = imgui.GetTime()
+    CALCFX.hist[#CALCFX.hist + 1] = { expr = shown_expr, res = calc_format_expr(calc_expr), raw = calc_expr }
+    if #CALCFX.hist > 15 then table.remove(CALCFX.hist, 1) end
 end
 -- CALC_LOGIC_END
 
@@ -833,93 +838,229 @@ local function sidebar_tab(label, id)
     end
 end
 
+-- ===================== Калькулятор: крупный экран, анимации, история =====================
+-- Все вспомогательные функции лежат внутри таблицы CALCFX (так не расходуются локальные переменные скрипта)
+function CALCFX.step(tbl, key, target, speed, dt)
+    local v = tbl[key] or 0
+    v = v + (target - v) * math.min(1, dt * speed)
+    tbl[key] = v
+    return v
+end
+
+-- Рисует одну кнопку калькулятора: плавная подсветка, свечение, "волна" от клика, нажатие вдавливает кнопку
+function CALCFX.button(id, label, kind, w, h, action)
+    local dl = imgui.GetWindowDrawList()
+    local p = imgui.GetCursorScreenPos()
+    local now = imgui.GetTime()
+    local dt = imgui.GetIO().DeltaTime
+
+    local clicked = imgui.InvisibleButton("##cb" .. id, imgui.ImVec2(w, h))
+    local hovered, held = imgui.IsItemHovered(), imgui.IsItemActive()
+    if clicked then
+        local m = imgui.GetMousePos()
+        CALCFX.ripple[id] = { t = now, x = m.x, y = m.y }
+        action()
+    end
+
+    local hv = CALCFX.step(CALCFX.hover, id, hovered and 1 or 0, 14, dt)
+    local pr = CALCFX.step(CALCFX.press, id, held and 1 or 0, 24, dt)
+
+    -- базовый цвет по типу кнопки: 0 цифра, 1 действие, 2 "=", 3 сброс
+    local br, bg, bb
+    if kind == 2 then
+        local a = UI_CFG.accent
+        br, bg, bb = a[1], a[2], a[3]
+    elseif kind == 3 then
+        br, bg, bb = 0.55, 0.18, 0.20
+    elseif kind == 1 then
+        br, bg, bb = 0.20, 0.20, 0.23
+    else
+        br, bg, bb = 0.145, 0.145, 0.165
+    end
+    local lift = 0.07 * hv - 0.05 * pr
+    local r, g, b = clamp(br + lift, 0, 1), clamp(bg + lift, 0, 1), clamp(bb + lift, 0, 1)
+
+    local pad = 2.5 * pr -- при нажатии кнопка чуть уменьшается
+    local x1, y1 = p.x + pad, p.y + pad
+    local x2, y2 = p.x + w - pad, p.y + h - pad
+    local round = 11
+
+    -- мягкое свечение вокруг кнопки при наведении (у "=" пульсирует всегда)
+    local ac = UI_CFG.accent
+    local glow = hv
+    if kind == 2 then glow = math.max(hv, 0.35 + 0.25 * math.sin(now * 3.0)) end
+    if glow > 0.02 then
+        for i = 3, 1, -1 do
+            dl:AddRect(imgui.ImVec2(x1 - i * 1.6, y1 - i * 1.6), imgui.ImVec2(x2 + i * 1.6, y2 + i * 1.6),
+                col32(ac[1], ac[2], ac[3], 0.10 * glow * (4 - i) / 3), round + i, 15, 1.4)
+        end
+    end
+
+    dl:AddRectFilled(imgui.ImVec2(x1, y1), imgui.ImVec2(x2, y2), col32(r, g, b, 1), round)
+    -- блик сверху
+    dl:AddRectFilled(imgui.ImVec2(x1 + 2, y1 + 2), imgui.ImVec2(x2 - 2, y1 + (y2 - y1) * 0.45), col32(1, 1, 1, 0.045 + 0.03 * hv), round - 2)
+    -- рамка
+    local ba = 0.10 + 0.75 * hv
+    dl:AddRect(imgui.ImVec2(x1, y1), imgui.ImVec2(x2, y2), col32(ac[1], ac[2], ac[3], ba), round, 15, 1.2)
+
+    -- волна от места клика
+    local rp = CALCFX.ripple[id]
+    if rp then
+        local k = (now - rp.t) / 0.5
+        if k >= 1 then
+            CALCFX.ripple[id] = nil
+        else
+            dl:PushClipRect(imgui.ImVec2(x1, y1), imgui.ImVec2(x2, y2), true)
+            dl:AddCircleFilled(imgui.ImVec2(rp.x, rp.y), k * math.max(w, h) * 1.1, col32(1, 1, 1, 0.30 * (1 - k)), 32)
+            dl:PopClipRect()
+        end
+    end
+
+    -- подпись по центру
+    local ts = imgui.CalcTextSize(label)
+    dl:AddText(imgui.ImVec2(p.x + (w - ts.x) / 2, p.y + (h - ts.y) / 2 + pr), col32(1, 1, 1, 0.95), label)
+end
+
+-- Крупный экран: прошлое выражение сверху, результат крупно, при "=" цифры "выпрыгивают"
+function CALCFX.display(w, h)
+    local now = imgui.GetTime()
+    local ac = UI_CFG.accent
+    local p = imgui.GetCursorScreenPos()
+    local dl = imgui.GetWindowDrawList()
+
+    local flash = clamp(1 - (now - CALCFX.pop_t) / 0.6, 0, 1)
+    dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), col32(0.075, 0.075, 0.09, 1), 14)
+    dl:AddRectFilled(p, imgui.ImVec2(p.x + w, p.y + h), col32(ac[1], ac[2], ac[3], 0.05 + 0.10 * flash), 14)
+    dl:AddRect(p, imgui.ImVec2(p.x + w, p.y + h), col32(ac[1], ac[2], ac[3], 0.35 + 0.55 * flash), 14, 15, 1.5)
+
+    local fs = clamp(h / 100 * 1.9, 1.7, 3.2)
+    local shown, color
+    if calc_error then
+        shown, color = calc_error, { 1.0, 0.38, 0.38 }
+    else
+        shown, color = (calc_expr == "") and "0" or calc_format_expr(calc_expr), { 1, 1, 1 }
+    end
+
+    -- предыдущее выражение (мелко, справа сверху)
+    imgui.SetWindowFontScale(1.1)
+    local prev = calc_prev ~= "" and calc_prev or ""
+    local ps = imgui.CalcTextSize(prev)
+    dl:AddText(imgui.ImVec2(p.x + w - 16 - ps.x, p.y + 10), col32(0.62, 0.62, 0.68, 1), prev)
+
+    -- основной текст: подбираем размер, чтобы влез, плюс "прыжок" после "="
+    local pop = 1 + 0.16 * flash * flash
+    local scale = fs
+    imgui.SetWindowFontScale(scale)
+    while scale > 0.9 and imgui.CalcTextSize(shown).x > (w - 36) / pop do
+        scale = scale - 0.1
+        imgui.SetWindowFontScale(scale)
+    end
+    local ts = imgui.CalcTextSize(shown)
+    local s2 = scale * pop
+    imgui.SetWindowFontScale(s2)
+    ts = imgui.CalcTextSize(shown)
+    local tx = p.x + w - 18 - ts.x
+    local ty = p.y + h - 12 - ts.y + 4 * (1 - flash)
+    dl:AddText(imgui.ImVec2(tx + 1.5, ty + 1.5), col32(0, 0, 0, 0.5), shown)
+    dl:AddText(imgui.ImVec2(tx, ty), col32(color[1], color[2], color[3], 1), shown)
+    imgui.SetWindowFontScale(1.0)
+
+    imgui.Dummy(imgui.ImVec2(w, h))
+end
+
+-- Панель истории: клик по записи подставляет результат обратно в калькулятор
+function CALCFX.history(w, h)
+    local ac = UI_CFG.accent
+    if imgui.BeginChild("##calc_hist", imgui.ImVec2(w, h), true) then
+        imgui.TextColored(accent_vec(1.2), ic("CLOCK_ROTATE_LEFT", "") .. " История")
+        imgui.Separator()
+        if #CALCFX.hist == 0 then
+            imgui.TextColored(imgui.ImVec4(0.55, 0.55, 0.6, 1), "Пока пусто")
+        else
+            for i = #CALCFX.hist, 1, -1 do
+                local e = CALCFX.hist[i]
+                imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+                imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.0, 0.25))
+                imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(1.0, 0.4))
+                if imgui.Button(e.res .. "##h" .. i, imgui.ImVec2(-1, 34)) then
+                    calc_expr, calc_prev, calc_error, calc_fresh = e.raw, "", nil, false
+                end
+                imgui.PopStyleColor(3)
+                imgui.TextColored(imgui.ImVec4(0.55, 0.55, 0.6, 1), e.expr)
+                imgui.Spacing()
+            end
+        end
+        if #CALCFX.hist > 0 then
+            if imgui.Button("Очистить##hclr", imgui.ImVec2(-1, 28)) then CALCFX.hist = {} end
+        end
+    end
+    imgui.EndChild()
+end
+
 local function draw_calculator()
+    local sw, sh = getScreenResolution()
+    -- при первом заходе во вкладку растягиваем окно, чтобы калькулятору хватило места
+    if not CALCFX.grown then
+        CALCFX.grown = true
+        if LAYOUT.w < 960 or LAYOUT.h < 640 then
+            LAYOUT.req = { w = math.min(math.max(LAYOUT.w, 980), sw - 40), h = math.min(math.max(LAYOUT.h, 660), sh - 40) }
+        end
+    end
+
     -- Шапка
     imgui.AlignTextToFramePadding()
     imgui.SetCursorPosX(9)
     imgui.Text(ic("CALCULATOR", "") .. " Калькулятор")
-    imgui.SameLine(LAYOUT.w - SIDEBAR_W - 29)
+    imgui.SameLine(LAYOUT.w - SIDEBAR_W - 76)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+    if imgui.Button(ic("CLOCK_ROTATE_LEFT", "H") .. "##calc_hist_btn", imgui.ImVec2(30, 24)) then
+        CALCFX.hist_open = not CALCFX.hist_open
+    end
+    imgui.SameLine(LAYOUT.w - SIDEBAR_W - 29)
     if imgui.Button(FA.CIRCLE_XMARK .. "##close_calc", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
     imgui.PopStyleColor(1)
     imgui.Spacing()
 
-    local calc_w, btn_w, btn_h = 355, 85, 54
-    local x0 = (LAYOUT.w - SIDEBAR_W - calc_w) / 2
+    local avail = imgui.GetContentRegionAvail()
+    local gap = 9
+    local hist_w = CALCFX.hist_open and 200 or 0
+    local area_w = avail.x - hist_w - (hist_w > 0 and 12 or 0) - 16
+    local cw = clamp(area_w, 300, 720)
+    local disp_h = clamp(avail.y * 0.25, 92, 160)
+    local btn_h = clamp((avail.y - disp_h - 6 * gap - 6) / 5, 40, 110)
+    local btn_w = (cw - 3 * gap) / 4
+    local x0 = 8 + math.max(0, (area_w - cw) / 2)
+    local y0 = imgui.GetCursorPosY()
 
-    -- Экран калькулятора
-    imgui.SetCursorPosX(x0)
-    if imgui.BeginChild("##calc_display", imgui.ImVec2(calc_w, 92), true) then
-        local avail = imgui.GetContentRegionAvail().x
+    imgui.SetCursorPos(imgui.ImVec2(x0, y0))
+    CALCFX.display(cw, disp_h)
 
-        local prev_text = calc_prev ~= "" and calc_prev or " "
-        local pw = imgui.CalcTextSize(prev_text).x
-        imgui.SetCursorPosX(math.max(5, 5 + avail - pw))
-        imgui.TextColored(imgui.ImVec4(0.60, 0.60, 0.65, 1.00), prev_text)
-
-        local shown, color
-        if calc_error then
-            shown = calc_error
-            color = imgui.ImVec4(1.00, 0.35, 0.35, 1.00)
-        else
-            shown = (calc_expr == "") and "0" or calc_format_expr(calc_expr)
-            color = imgui.ImVec4(1.00, 1.00, 1.00, 1.00)
-        end
-
-        local scale = 1.7
-        imgui.SetWindowFontScale(scale)
-        while scale > 0.8 and imgui.CalcTextSize(shown).x > avail do
-            scale = scale - 0.1
-            imgui.SetWindowFontScale(scale)
-        end
-        local tw = imgui.CalcTextSize(shown).x
-        imgui.SetCursorPosX(math.max(5, 5 + avail - tw))
-        imgui.TextColored(color, shown)
-        imgui.SetWindowFontScale(1.0)
-    end
-    imgui.EndChild()
-
-    -- Кнопки
+    local function d(n) return function() calc_digit(n) end end
+    local function o(n) return function() calc_op(n) end end
     local rows = {
-        { {"C", calc_clear, 3}, {ic("DELETE_LEFT", "<"), calc_back, 1}, {ic("PERCENT", "%"), calc_percent, 1}, {ic("DIVIDE", "/"), function() calc_op("/") end, 1} },
-        { {"7", function() calc_digit("7") end, 0}, {"8", function() calc_digit("8") end, 0}, {"9", function() calc_digit("9") end, 0}, {ic("XMARK", "x"), function() calc_op("*") end, 1} },
-        { {"4", function() calc_digit("4") end, 0}, {"5", function() calc_digit("5") end, 0}, {"6", function() calc_digit("6") end, 0}, {ic("MINUS", "-"), function() calc_op("-") end, 1} },
-        { {"1", function() calc_digit("1") end, 0}, {"2", function() calc_digit("2") end, 0}, {"3", function() calc_digit("3") end, 0}, {ic("PLUS", "+"), function() calc_op("+") end, 1} },
-        { {"0", function() calc_digit("0") end, 0}, {"000", function() calc_digit("000") end, 0}, {",", calc_dot, 0}, {ic("EQUALS", "="), calc_equals, 2} },
+        { {"C", calc_clear, 3}, {ic("DELETE_LEFT", "<"), calc_back, 1}, {ic("PERCENT", "%"), calc_percent, 1}, {ic("DIVIDE", "/"), o("/"), 1} },
+        { {"7", d("7"), 0}, {"8", d("8"), 0}, {"9", d("9"), 0}, {ic("XMARK", "x"), o("*"), 1} },
+        { {"4", d("4"), 0}, {"5", d("5"), 0}, {"6", d("6"), 0}, {ic("MINUS", "-"), o("-"), 1} },
+        { {"1", d("1"), 0}, {"2", d("2"), 0}, {"3", d("3"), 0}, {ic("PLUS", "+"), o("+"), 1} },
+        { {"0", d("0"), 0}, {"000", d("000"), 0}, {",", calc_dot, 0}, {ic("EQUALS", "="), calc_equals, 2} },
     }
 
-    imgui.SetWindowFontScale(1.25)
+    imgui.SetWindowFontScale(clamp(btn_h / 54 * 1.25, 1.2, 2.0))
     for r, row in ipairs(rows) do
-        imgui.SetCursorPosX(x0)
+        imgui.SetCursorPos(imgui.ImVec2(x0, y0 + disp_h + gap + (r - 1) * (btn_h + gap)))
         for c, b in ipairs(row) do
-            if c > 1 then imgui.SameLine() end
-            local style = b[3]
-            local pushed = false
-            if style == 1 then
-                imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.17, 0.17, 0.19, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.21, 0.21, 0.23, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.25, 0.25, 0.27, 1.00))
-                pushed = true
-            elseif style == 2 then
-                imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
-                imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.15))
-                imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(0.85))
-                pushed = true
-            elseif style == 3 then
-                imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.55, 0.18, 0.18, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.65, 0.22, 0.22, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.45, 0.15, 0.15, 1.00))
-                pushed = true
-            end
-            if imgui.Button(b[1] .. "##cb" .. r .. "_" .. c, imgui.ImVec2(btn_w, btn_h)) then
-                b[2]()
-            end
-            if pushed then imgui.PopStyleColor(3) end
+            if c > 1 then imgui.SameLine(0, gap) end
+            CALCFX.button(r .. "_" .. c, b[1], b[3], btn_w, btn_h, b[2])
         end
     end
     imgui.SetWindowFontScale(1.0)
+
+    if hist_w > 0 then
+        imgui.SetCursorPos(imgui.ImVec2(x0 + cw + 12 + math.max(0, (area_w - cw) / 2) * 0, y0))
+        CALCFX.history(hist_w, disp_h + 5 * (btn_h + gap))
+    end
 end
 
 -- ===================== Новые разделы: PayDay, фразы, о скрипте =====================
@@ -1382,7 +1523,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.7"
+local SCRIPT_VERSION = "1.9"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1942,18 +2083,30 @@ payday_frame = imgui.OnFrame(
 imgui.OnInitialize(function()
     -- иконки в стандартный шрифт (его создаёт mimgui)
     safe_call("fa_init", function() fa.Init() end)
-    -- свой шрифт: добавляем с кириллицей, дублируем в него иконки и делаем основным
+    -- шрифт рисуем в 2 раза крупнее и уменьшаем масштабом: так крупные надписи (SetWindowFontScale) остаются чёткими,
+    -- а обычный текст выглядит как раньше
     safe_call("custom_font", function()
-        local pick
+        local path
         for _, f in ipairs(FONT_AVAILABLE) do
-            if f.key == UI_CFG.font and f.path then pick = f end
+            if f.key == UI_CFG.font and f.path then path = f.path end
         end
-        if not pick then return end
+        if not path then
+            -- "Системный": берём тот же Trebuchet, который mimgui использует по умолчанию
+            local ok, dir = pcall(getFolderPath, 0x14)
+            if ok and dir then
+                for _, name in ipairs({ "trebucbd.ttf", "trebuc.ttf", "arial.ttf" }) do
+                    if doesFileExist(dir .. "\\" .. name) then path = dir .. "\\" .. name break end
+                end
+            end
+        end
+        if not path then return end
         local io_ = imgui.GetIO()
-        local font = io_.Fonts:AddFontFromFileTTF(pick.path, 14, nil, io_.Fonts:GetGlyphRangesCyrillic())
+        local font = io_.Fonts:AddFontFromFileTTF(path, 28, nil, io_.Fonts:GetGlyphRangesCyrillic())
         if font ~= nil then
-            fa.Init()
+            -- иконки в тот же крупный размер (если версия fAwesome6 не принимает размер, берётся обычный)
+            if not pcall(fa.Init, 28) then pcall(fa.Init) end
             io_.FontDefault = font
+            io_.FontGlobalScale = 0.5
         end
     end)
     safe_call("apply_theme", apply_theme)
