@@ -266,6 +266,7 @@ end
 local UI_CFG = {
     accent = {0.18, 0.45, 0.85}, opacity = 1.0, overlay_scale = 1.0, open_key = 0, toasts = true, toast_corner = 3,
     border_mode = 1, border_speed = 1.0, shadow = true, font = "seguisb",
+    win_w = 835, win_h = 500,
 }
 
 -- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
@@ -494,10 +495,14 @@ function apply_theme()
     setc("SliderGrabActive", accent_vec(1.25))
     setc("PlotHistogram", accent_vec(1.0))
     setc("TextSelectedBg", imgui.ImVec4(ac[1], ac[2], ac[3], 0.35))
+    setc("ResizeGrip", imgui.ImVec4(ac[1], ac[2], ac[3], 0.45))
+    setc("ResizeGripHovered", imgui.ImVec4(ac[1], ac[2], ac[3], 0.75))
+    setc("ResizeGripActive", imgui.ImVec4(ac[1], ac[2], ac[3], 1.00))
 end
 
 -- ===================== Левая панель и калькулятор =====================
 local SIDEBAR_W = 200
+local LAYOUT = { w = 835, h = 500, tab_h = 42, block_y = 340, force = false } -- текущие размеры главного окна
 local current_tab = 1 -- 1 = Arizona Prices, 2 = Калькулятор, 3 = Отчет до PayDay, 4 = Фразы, 5 = О скрипте, 6 = Время стран
 
 local calc_expr = ""
@@ -805,9 +810,9 @@ end
 local function draw_sidebar_bg(wpos)
     local dl = imgui.GetWindowDrawList()
     local col = imgui.ColorConvertFloat4ToU32(dark(0.088, 1.0))
-    dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), col, 12)
-    dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), col)
-    dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 492), imgui.GetColorU32(imgui.Col.Separator), 1.0)
+    dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col, 12)
+    dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col)
+    dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h - 8), imgui.GetColorU32(imgui.Col.Separator), 1.0)
 end
 
 local function sidebar_tab(label, id)
@@ -816,7 +821,7 @@ local function sidebar_tab(label, id)
         imgui.PushStyleColor(imgui.Col.Button, blend(0.115, 0.28))
     end
     imgui.SetWindowFontScale(1.15)
-    if imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, 42)) then
+    if imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, LAYOUT.tab_h)) then
         current_tab = id
     end
     imgui.SetWindowFontScale(1.0)
@@ -833,7 +838,7 @@ local function draw_calculator()
     imgui.AlignTextToFramePadding()
     imgui.SetCursorPosX(9)
     imgui.Text(ic("CALCULATOR", "") .. " Калькулятор")
-    imgui.SameLine(606)
+    imgui.SameLine(LAYOUT.w - SIDEBAR_W - 29)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
     if imgui.Button(FA.CIRCLE_XMARK .. "##close_calc", imgui.ImVec2(24, 24)) then
         main_window[0] = false
@@ -842,7 +847,7 @@ local function draw_calculator()
     imgui.Spacing()
 
     local calc_w, btn_w, btn_h = 355, 85, 54
-    local x0 = (635 - calc_w) / 2
+    local x0 = (LAYOUT.w - SIDEBAR_W - calc_w) / 2
 
     -- Экран калькулятора
     imgui.SetCursorPosX(x0)
@@ -956,6 +961,8 @@ local function load_settings()
         UI_CFG.border_speed = clamp(tonumber(u.border_speed) or 1.0, 0.2, 3.0)
         UI_CFG.shadow = (u.shadow ~= false)
         if type(u.font) == "string" then UI_CFG.font = u.font end
+        UI_CFG.win_w = clamp(math.floor(tonumber(u.win_w) or 835), 700, 2400)
+        UI_CFG.win_h = clamp(math.floor(tonumber(u.win_h) or 500), 400, 1400)
     end
 end
 
@@ -1001,7 +1008,7 @@ local function section_header(icon, title)
     imgui.AlignTextToFramePadding()
     imgui.SetCursorPosX(9)
     imgui.Text(icon .. " " .. title)
-    imgui.SameLine(606)
+    imgui.SameLine(LAYOUT.w - SIDEBAR_W - 29)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
     if imgui.Button(FA.CIRCLE_XMARK .. "##close_section", imgui.ImVec2(24, 24)) then
         main_window[0] = false
@@ -1012,7 +1019,7 @@ end
 
 local function draw_payday_tab()
     section_header(ic("CLOCK", ""), "Отчет до PayDay")
-    if imgui.BeginChild("##payday_child", imgui.ImVec2(-1, 421), true) then
+    if imgui.BeginChild("##payday_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
         imgui.TextWrapped("На экране появится надпись «До PayDay: N мин N сек». PayDay выплачивается каждые 30 минут: в :00 и :30.")
         imgui.Spacing()
         if imgui.Checkbox(" Включить", payday_on) then
@@ -1100,7 +1107,7 @@ local about_links = {
 
 local function draw_about_tab()
     section_header(ic("CIRCLE_INFO", ""), "О скрипте")
-    if imgui.BeginChild("##about_child", imgui.ImVec2(-1, 421), true) then
+    if imgui.BeginChild("##about_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
         imgui.TextColored(imgui.ImVec4(0.30, 0.65, 1.00, 1.00), "Arizona Prices V2.0")
         imgui.TextWrapped("Спасибо, что пользуешься скриптом! Заходи в наши соцсети: там актуальные цены, новости и обновления. Нашёл ошибку или есть идея - пиши разработчику в личные сообщения.")
         imgui.Spacing()
@@ -1250,7 +1257,7 @@ end
 
 local function draw_time_tab()
     section_header(ic("GLOBE", ""), "Время стран")
-    if imgui.BeginChild("##time_child", imgui.ImVec2(-1, 421), true) then
+    if imgui.BeginChild("##time_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
         local sel = countries[selected_country]
         local tm, dt = country_time(sel)
         local width = imgui.GetWindowWidth()
@@ -1375,7 +1382,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.5"
+local SCRIPT_VERSION = "1.6"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1579,7 +1586,7 @@ local function request_update()
 end
 
 local function draw_update_block()
-    imgui.SetCursorPos(imgui.ImVec2(5, 340))
+    imgui.SetCursorPos(imgui.ImVec2(5, LAYOUT.block_y))
     imgui.TextDisabled("Версия " .. SCRIPT_VERSION)
     imgui.SetCursorPosX(5)
     if update_info.available then
@@ -1737,7 +1744,7 @@ end
 
 local function draw_settings_tab()
     section_header(ic("GEAR", ""), "Настройки")
-    if imgui.BeginChild("##settings_child", imgui.ImVec2(-1, 421), true) then
+    if imgui.BeginChild("##settings_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
         sub_title("PALETTE", "Темы оформления")
         for i, th in ipairs(THEMES) do
             local c = th.c
@@ -1842,6 +1849,10 @@ local function draw_settings_tab()
             sui.shadow[0] = true
             apply_theme()
             mark_ui_dirty()
+        end
+        imgui.SameLine()
+        if imgui.Button(ic("EXPAND", "") .. " Сбросить размер окна##reset_size", imgui.ImVec2(230, 28)) then
+            LAYOUT.force = true
         end
 
         sub_title("KEYBOARD", "Управление")
@@ -1949,15 +1960,38 @@ imgui.OnInitialize(function()
     safe_call("load_data", load_data)
 end)
 
+-- размеры окна: запоминаем в настройках, пересчитываем высоту вкладок левой панели
+local function layout_update(wsz)
+    if wsz.x < 700 or wsz.y < 400 then
+        wsz = imgui.ImVec2(math.max(700, wsz.x), math.max(400, wsz.y))
+        imgui.SetWindowSize(wsz, imgui.Cond.Always)
+    end
+    LAYOUT.w, LAYOUT.h = wsz.x, wsz.y
+    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 7) - 5, 28, 42)
+    LAYOUT.block_y = 5 + 7 * (LAYOUT.tab_h + 5) + 6
+    local w, h = math.floor(wsz.x + 0.5), math.floor(wsz.y + 0.5)
+    if w ~= UI_CFG.win_w or h ~= UI_CFG.win_h then
+        UI_CFG.win_w, UI_CFG.win_h = w, h
+        mark_ui_dirty()
+    end
+end
+
 imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
     guard_frame("menu", function(player)
         if main_window[0] then 
             local sw, sh = getScreenResolution()
             imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5)) 
-            imgui.SetNextWindowSize(imgui.ImVec2(SIDEBAR_W + 635, 500), imgui.Cond.Always)
-            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
+            if LAYOUT.force then
+                LAYOUT.force = false
+                imgui.SetNextWindowSize(imgui.ImVec2(835, 500), imgui.Cond.Always)
+            else
+                imgui.SetNextWindowSize(imgui.ImVec2(UI_CFG.win_w, UI_CFG.win_h), imgui.Cond.FirstUseEver)
+            end
+            pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
+            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
+                layout_update(imgui.GetWindowSize())
                 local wpos = imgui.GetWindowPos()
-                local win_cx, win_cy = wpos.x + (SIDEBAR_W + 635) / 2, wpos.y + 500 / 2
+                local win_cx, win_cy = wpos.x + LAYOUT.w / 2, wpos.y + LAYOUT.h / 2
                 hk.typing = imgui.GetIO().WantTextInput
 
                 -- Левая панель с вкладками
@@ -1974,15 +2008,18 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
 
                 -- Правая часть (содержимое выбранной вкладки)
                 imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W, 0))
-                local content_flags = bit.bor(imgui.WindowFlags.AlwaysUseWindowPadding or 0, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)
-                local content_visible = imgui.BeginChild("##content", imgui.ImVec2(635, 500), false, content_flags)
+                local content_flags = imgui.WindowFlags.AlwaysUseWindowPadding or 0
+                if not (current_tab == 2 and (LAYOUT.h < 495 or LAYOUT.w < 830)) then
+                    content_flags = bit.bor(content_flags, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)
+                end
+                local content_visible = imgui.BeginChild("##content", imgui.ImVec2(LAYOUT.w - SIDEBAR_W, LAYOUT.h), false, content_flags)
                 if content_visible then
                 if current_tab == 1 then
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
                 imgui.Text(FA.CIRCLE_DOLLAR .. u8(' Arizona Prices'))
                 imgui.SameLine(140) 
-                imgui.SetNextItemWidth(306) 
+                imgui.SetNextItemWidth(math.max(90, LAYOUT.w - SIDEBAR_W - 329)) 
                 imgui.InputTextWithHint("##search", FA.MAGNIFYING_GLASS .. " Поиск", buf_search, ffi.sizeof(buf_search))
                 imgui.SameLine() 
                 imgui.SetNextItemWidth(150)
@@ -2002,7 +2039,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     imgui.EndCombo()
                 end
                 
-                imgui.SameLine(606) 
+                imgui.SameLine(LAYOUT.w - SIDEBAR_W - 29) 
                 imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0)) 
                 if imgui.Button(FA.CIRCLE_XMARK .. "##close", imgui.ImVec2(24, 24)) then 
                     main_window[0] = false 
@@ -2010,12 +2047,12 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 imgui.PopStyleColor(1) 
                 imgui.Spacing()
 
-                if imgui.BeginChild("##table_child", imgui.ImVec2(-1, 421), true) then 
+                if imgui.BeginChild("##table_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then 
                     local table_style = imgui.GetStyle() 
                     local table_start_x = imgui.GetCursorScreenPos().x
                     local table_top_y = imgui.GetCursorScreenPos().y - table_style.WindowPadding.y 
                     local separator_spacing = table_style.ItemSpacing.y 
-                    local col_w0, col_w1, col_w2, col_w3 = 275, 140, 120, 80
+                    local col_w0, col_w1, col_w2, col_w3 = math.max(110, math.floor(imgui.GetContentRegionAvail().x) - 340), 140, 120, 80
                     
                     imgui.Columns(4, "item_table", false) 
                     imgui.SetColumnWidth(0, col_w0) 
@@ -2317,7 +2354,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
                 imgui.EndChild()
 
-                draw_window_fx(wpos.x, wpos.y, wpos.x + SIDEBAR_W + 635, wpos.y + 500)
+                draw_window_fx(wpos.x, wpos.y, wpos.x + LAYOUT.w, wpos.y + LAYOUT.h)
                 imgui.End()
             else
                 imgui.End()
