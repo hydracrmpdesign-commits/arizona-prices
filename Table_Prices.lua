@@ -306,7 +306,7 @@ end
 -- ===================== Анимации интерфейса =====================
 -- Всё лежит в одной таблице ANIM (так не расходуются локальные переменные скрипта).
 -- ANIM.a - текущая прозрачность (окно -> вкладка -> строка таблицы). Её учитывает col32 и ручная отрисовка,
--- а для обычных элементов ImGui она же ставится через PushStyleVar(Alpha).
+-- а для обычных элементов ImGui она же ставится через style.Alpha.
 -- Скорость и «мягкость» анимаций меняются числами в этой таблице.
 local ANIM = {
     a = 1, stack = {}, dt = 0.016,
@@ -335,6 +335,13 @@ end
 
 -- вызывается каждый кадр: двигает прогресс окна и ловит смену вкладки; возвращает false, когда окно полностью скрыто
 function ANIM.update(open, tab)
+    if ANIM.off then
+        ANIM.opened = open and true or false
+        ANIM.t = open and 1 or 0
+        ANIM.e = ANIM.t
+        ANIM.tab, ANIM.tab_t, ANIM.rows_t0 = tab, 1, -1e6
+        return open and true or false
+    end
     local dt = 0.016
     local ok, v = pcall(function() return imgui.GetIO().DeltaTime end)
     if ok and type(v) == "number" and v > 0 then dt = math.min(v, 0.05) end
@@ -375,28 +382,37 @@ function ANIM.place(sw, sh, e)
     pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(1, 1), imgui.ImVec2(math.max(700, sw - 20, w), math.max(400, sh - 20, h)))
 end
 
+-- прозрачность виджетов ImGui ставим прямой записью в style.Alpha (без стека PushStyleVar/PopStyleVar,
+-- чтобы при любой ошибке стек не рассинхронизировался и игра не падала)
+function ANIM.set_alpha(a)
+    local ok = pcall(function() imgui.GetStyle().Alpha = a end)
+    if not ok then ANIM.off = true end
+end
+
 -- умножает прозрачность на f (и для виджетов ImGui, и для ручной отрисовки)
 function ANIM.push(f)
     local prev = ANIM.a
     ANIM.stack[#ANIM.stack + 1] = prev
+    if ANIM.off then return end
     ANIM.a = prev * f
-    imgui.PushStyleVar(imgui.StyleVar.Alpha, ANIM.a)
+    ANIM.set_alpha(ANIM.a)
 end
 
 function ANIM.pop()
     local prev = table.remove(ANIM.stack)
-    if prev then ANIM.a = prev end
-    imgui.PopStyleVar()
+    if prev then
+        ANIM.a = prev
+        ANIM.set_alpha(prev)
+    end
 end
 
--- при ошибке в кадре возвращаем всё в исходное состояние
+-- при ошибке в кадре возвращаем всё в исходное состояние и навсегда (до перезагрузки скрипта) отключаем анимации
 function ANIM.reset()
-    while #ANIM.stack > 0 do
-        table.remove(ANIM.stack)
-        pcall(imgui.PopStyleVar)
-    end
+    ANIM.stack = {}
     ANIM.a = 1
+    pcall(function() imgui.GetStyle().Alpha = 1 end)
     ANIM.t, ANIM.e, ANIM.opened, ANIM.settle = 0, 0, false, false
+    ANIM.off = true
 end
 
 -- прогресс появления строки таблицы с номером ri (0..1); строки идут каскадом
@@ -407,6 +423,7 @@ end
 
 -- сменился поиск или сортировка - каскад начинается заново
 function ANIM.rows_check(key)
+    if ANIM.off then return end
     if key ~= ANIM.rows_key then
         if ANIM.rows_key ~= nil then ANIM.rows_t0 = os.clock() end
         ANIM.rows_key = key
@@ -1663,7 +1680,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.6"
+local SCRIPT_VERSION = "2.7"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
