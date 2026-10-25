@@ -1,9 +1,27 @@
-local imgui = require('mimgui') 
-local fa = require('fAwesome6') 
-local ffi = require('ffi') 
-local encoding = require('encoding') 
-encoding.default = 'CP1251' 
+local ffi = require('ffi')
+local encoding = require('encoding')
+encoding.default = 'CP1251'
 local u8 = encoding.UTF8
+
+-- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
+-- а пишет в чат, что именно нужно установить
+local ok_imgui, imgui = pcall(require, 'mimgui')
+local ok_fa, fa = pcall(require, 'fAwesome6')
+if not ok_imgui or not ok_fa then
+    local missing = {}
+    if not ok_imgui then missing[#missing + 1] = "mimgui" end
+    if not ok_fa then missing[#missing + 1] = "fAwesome6" end
+    function main()
+        while not isSampAvailable() do wait(100) end
+        sampAddChatMessage(u8:decode("{FF5555}[Arizona Prices] {FFFFFF}Не найдены библиотеки: {FFCC33}" .. table.concat(missing, ", ") .. "{FFFFFF}. Положите их в папку {FFCC33}moonloader\\lib{FFFFFF} и перезапустите игру."), -1)
+        sampAddChatMessage(u8:decode("{FF5555}[Arizona Prices] {FFFFFF}Где скачать, смотрите в нашем ТГК: {33AAFF}@arizona_prices"), -1)
+        thisScript():unload()
+    end
+    return
+end
+
+-- иконки: если в вашей версии fAwesome6 такой иконки нет, будет пустое место, а не вылет скрипта
+local FA = setmetatable({}, { __index = function(_, k) return fa[k] or "" end })
 
 ffi.cdef[[
     int ShellExecuteA(void* hwnd, const char* op, const char* file, const char* params, const char* dir, int show);
@@ -17,8 +35,8 @@ end
 
 local main_window = imgui.new.bool(false) 
 local modal_window = imgui.new.bool(false) 
-local MODAL_ID_ADD = fa.CIRCLE_PLUS .. " Добавить предмет###item_modal"
-local MODAL_ID_EDIT = fa.PEN_LINE .. " Редактировать предмет###item_modal"
+local MODAL_ID_ADD = FA.CIRCLE_PLUS .. " Добавить предмет###item_modal"
+local MODAL_ID_EDIT = FA.PEN_LINE .. " Редактировать предмет###item_modal"
 
 local buf_search = imgui.new.char[256]() 
 local buf_item = imgui.new.char[256]() 
@@ -40,44 +58,172 @@ local empty_sell_field = false
 local items_list = {} 
 local datadir = getWorkingDirectory() .. "\\config\\item_prices.json"
 
-local function load_data()
-    if doesFileExist(datadir) then 
-        local f = io.open(datadir, "r") 
-        if f then 
-            local content = f:read("*a") 
-            f:close() 
-            local success, data = pcall(decodeJson, content) 
-            if success and type(data) == "table" then 
-                items_list = data 
-            end 
-        end 
-    else 
-        items_list = {} 
+-- ===================== Защита данных и журнал ошибок =====================
+local pending_notices = {}
+local function queue_notice(text, kind)
+    pending_notices[#pending_notices + 1] = { text = text, kind = kind }
+end
+
+local err_log = {}
+local function tb(e)
+    return debug.traceback(tostring(e), 2)
+end
+
+local function log_error(where, err)
+    local text = tostring(err)
+    err_log[#err_log + 1] = os.date("%H:%M:%S") .. " [" .. tostring(where) .. "] " .. (text:sub(1, 300):gsub("%s+", " "))
+    if #err_log > 8 then table.remove(err_log, 1) end
+    pcall(function()
+        print("[Arizona Prices] " .. tostring(where) .. ": " .. text)
+        local dir = getWorkingDirectory() .. "\\config"
+        if not doesDirectoryExist(dir) then createDirectory(dir) end
+        local path = dir .. "\\arizona_prices_errors.log"
+        local f = io.open(path, "ab")
+        if f then
+            if (f:seek("end") or 0) > 200000 then
+                f:close()
+                f = io.open(path, "wb")
+            end
+            if f then
+                f:write(os.date("%Y-%m-%d %H:%M:%S") .. " [" .. tostring(where) .. "] " .. text .. "\n\n")
+                f:close()
+            end
+        end
+    end)
+end
+
+-- вызов функции без риска уронить скрипт: ошибка попадает в журнал
+local function safe_call(where, fn, ...)
+    local args = { ... }
+    local ok, err = xpcall(function() return fn(unpack(args)) end, tb)
+    if not ok then log_error(where, err) end
+    return ok
+end
+
+-- действия, которые нельзя выполнять прямо из кадра отрисовки (скачивание, отправка в чат):
+-- кадр только кладёт их в очередь, выполняет основной поток
+local ui_actions = {}
+local function defer(fn)
+    ui_actions[#ui_actions + 1] = fn
+end
+
+-- обёртка для окон: ошибка внутри окна не роняет скрипт, а попадает в журнал
+local function guard_frame(name, fn, on_fail)
+    return function(...)
+        local args = { ... }
+        local n = select("#", ...)
+        local ok, err = xpcall(function() return fn(unpack(args, 1, n)) end, tb)
+        if not ok then
+            log_error("frame:" .. name, err)
+            queue_notice("Ошибка в окне (" .. name .. "). Откройте Настройки и нажмите «Сообщить об ошибке»", "err")
+            if on_fail then pcall(on_fail) end
+        end
     end
 end
 
-local function save_data() 
-    local dir = getWorkingDirectory() .. "\\config" 
-    if not doesDirectoryExist(dir) then 
-        createDirectory(dir) 
-    end 
-    local f = io.open(datadir, "w") 
-    if f then 
-        f:write(encodeJson(items_list)) 
-        f:close() 
-    end 
+local function read_file_raw(path)
+    local f = io.open(path, "rb")
+    if not f then return nil end
+    local c = f:read("*a")
+    f:close()
+    return c
 end
 
-local function format_price(amount) 
-    local num = tonumber(amount) 
+local function write_file_raw(path, content)
+    local f = io.open(path, "wb")
+    if not f then return false end
+    local ok = f:write(content)
+    f:close()
+    return ok ~= nil and ok ~= false
+end
+
+local function json_ok(str)
+    if type(str) ~= "string" or str == "" then return false end
+    local ok, d = pcall(decodeJson, str)
+    return ok and type(d) == "table"
+end
+
+-- безопасная запись: сначала во временный файл, проверка, копия старой версии (.bak), потом замена
+local function safe_write(path, content)
+    if type(content) ~= "string" or content == "" then return false end
+    local tmp = path .. ".tmp"
+    if not write_file_raw(tmp, content) then os.remove(tmp); return false end
+    if read_file_raw(tmp) ~= content then os.remove(tmp); return false end
+    local old = read_file_raw(path)
+    if old and json_ok(old) then write_file_raw(path .. ".bak", old) end
+    os.remove(path)
+    if not os.rename(tmp, path) then
+        local ok = write_file_raw(path, content)
+        os.remove(tmp)
+        return ok
+    end
+    return true
+end
+
+-- безопасное чтение: если файл повреждён, берём резервную копию
+local function safe_read_json(path)
+    local c = read_file_raw(path)
+    if json_ok(c) then return decodeJson(c) end
+    local b = read_file_raw(path .. ".bak")
+    if json_ok(b) then
+        if c and c ~= "" then
+            queue_notice("Файл данных был повреждён - восстановили из резервной копии", "warn")
+            write_file_raw(path .. ".broken", c)
+        end
+        write_file_raw(path, b)
+        return decodeJson(b)
+    end
+    if c and c ~= "" then
+        write_file_raw(path .. ".broken", c)
+        queue_notice("Файл данных повреждён и копии нет - начинаем с чистого листа", "err")
+    end
+    return nil
+end
+
+local function load_data()
+    local data = safe_read_json(datadir)
+    if data then
+        local clean = {}
+        for _, v in ipairs(data) do
+            if type(v) == "table" then
+                clean[#clean + 1] = { item = tostring(v.item or ""), buy = tonumber(v.buy) or 0, sell = tonumber(v.sell) or 0 }
+            end
+        end
+        items_list = clean
+    elseif not doesFileExist(datadir) then
+        items_list = {}
+    end
+end
+
+local function save_data()
+    local dir = getWorkingDirectory() .. "\\config"
+    if not doesDirectoryExist(dir) then
+        createDirectory(dir)
+    end
+    local ok, json = pcall(encodeJson, items_list)
+    if ok and type(json) == "string" and json ~= "" then
+        if not safe_write(datadir, json) then
+            queue_notice("Не удалось сохранить список предметов", "err")
+        end
+    end
+end
+
+local function format_price(amount)
+    local num = tonumber(amount)
     if not num then return tostring(amount) end
-    local formatted = tostring(num):reverse():gsub("(%d%d%d)", "%1."):reverse() 
-    if formatted:sub(1, 1) == "." then formatted = formatted:sub(2) end 
-    return formatted
+    local sign = num < 0 and "-" or ""
+    num = math.abs(num)
+    local s = (num == math.floor(num)) and string.format("%.0f", num) or tostring(num)
+    local int, frac = s:match("^(%d+)(.*)$")
+    if not int then return sign .. s end
+    int = int:reverse():gsub("(%d%d%d)", "%1."):reverse()
+    if int:sub(1, 1) == "." then int = int:sub(2) end
+    return sign .. int .. frac
 end
 
 local function lower_cp1251(str) 
-    str = u8:decode(tostring(str or "")) 
+    local dec_ok, dec = pcall(function() return u8:decode(tostring(str or "")) end)
+    str = dec_ok and dec or tostring(str or "")
     return (str:gsub(".", function(char) 
         local byte = char:byte() 
         if byte >= 192 and byte <= 223 then 
@@ -116,41 +262,238 @@ local function open_edit_modal(index)
     pending_modal_open = true
 end
 
-function apply_theme() 
-    local style = imgui.GetStyle() 
-    local clr = style.Colors
-    style.WindowPadding = imgui.ImVec2(5, 5) 
-    style.FramePadding = imgui.ImVec2(5, 5) 
-    style.ItemSpacing = imgui.ImVec2(5, 5) 
-    style.ItemInnerSpacing = imgui.ImVec2(2, 2)
-    style.WindowTitleAlign = imgui.ImVec2(0.5, 0.5) 
-    style.ScrollbarSize = 10 
-    style.WindowBorderSize = 0 
-    style.PopupBorderSize = 0 
-    style.WindowRounding = 0 
-    style.ScrollbarRounding = 0
+-- ===================== Внешний вид (настраивается во вкладке «Настройки») =====================
+local UI_CFG = {
+    accent = {0.18, 0.45, 0.85}, opacity = 1.0, overlay_scale = 1.0, open_key = 0, toasts = true, toast_corner = 3,
+    border_mode = 1, border_speed = 1.0, shadow = true, font = "seguisb",
+}
 
-    clr[imgui.Col.WindowBg] = imgui.ImVec4(0.07, 0.07, 0.08, 1.00) 
-    clr[imgui.Col.PopupBg] = imgui.ImVec4(0.09, 0.09, 0.10, 1.00) 
-    clr[imgui.Col.Border] = imgui.ImVec4(1.00, 1.00, 1.00, 0.10)
-    clr[imgui.Col.TitleBg] = imgui.ImVec4(0.07, 0.07, 0.08, 1.00) 
-    clr[imgui.Col.TitleBgActive] = imgui.ImVec4(0.07, 0.07, 0.08, 1.00) 
-    clr[imgui.Col.TitleBgCollapsed] = imgui.ImVec4(0.07, 0.07, 0.08, 1.00)
-    clr[imgui.Col.FrameBg] = imgui.ImVec4(0.12, 0.12, 0.13, 1.00) 
-    clr[imgui.Col.FrameBgHovered] = imgui.ImVec4(0.15, 0.15, 0.16, 1.00) 
-    clr[imgui.Col.FrameBgActive] = imgui.ImVec4(0.18, 0.18, 0.19, 1.00)
-    clr[imgui.Col.Button] = imgui.ImVec4(0.12, 0.12, 0.13, 1.00) 
-    clr[imgui.Col.ButtonHovered] = imgui.ImVec4(0.15, 0.15, 0.16, 1.00) 
-    clr[imgui.Col.ButtonActive] = imgui.ImVec4(0.18, 0.18, 0.19, 1.00)
-    clr[imgui.Col.Header] = imgui.ImVec4(0.15, 0.15, 0.16, 1.00) 
-    clr[imgui.Col.HeaderHovered] = imgui.ImVec4(0.18, 0.18, 0.19, 1.00) 
-    clr[imgui.Col.HeaderActive] = imgui.ImVec4(0.21, 0.21, 0.22, 1.00)
-    clr[imgui.Col.ScrollbarBg] = imgui.ImVec4(0.00, 0.00, 0.00, 0.00) 
-    clr[imgui.Col.ScrollbarGrab] = imgui.ImVec4(0.12, 0.12, 0.13, 1.00) 
-    clr[imgui.Col.ScrollbarGrabHovered] = imgui.ImVec4(0.15, 0.15, 0.16, 1.00) 
-    clr[imgui.Col.ScrollbarGrabActive] = imgui.ImVec4(0.18, 0.18, 0.19, 1.00)
-    clr[imgui.Col.Separator] = imgui.ImVec4(1.00, 1.00, 1.00, 0.10) 
-    clr[imgui.Col.ModalWindowDimBg] = imgui.ImVec4(0.00, 0.00, 0.00, 0.65)
+-- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
+local FONT_LIST = {
+    { key = "seguisb",     name = "Segoe UI Semibold", file = "seguisb.ttf" },
+    { key = "segoeui",     name = "Segoe UI",          file = "segoeui.ttf" },
+    { key = "bahnschrift", name = "Bahnschrift",       file = "bahnschrift.ttf" },
+    { key = "corbel",      name = "Corbel",            file = "corbel.ttf" },
+    { key = "candara",     name = "Candara",           file = "candara.ttf" },
+    { key = "calibri",     name = "Calibri",           file = "calibri.ttf" },
+    { key = "verdana",     name = "Verdana",           file = "verdana.ttf" },
+    { key = "tahoma",      name = "Tahoma",            file = "tahoma.ttf" },
+}
+local FONT_AVAILABLE = { { key = "default", name = "Системный (Trebuchet)" } }
+pcall(function()
+    local dir = getFolderPath(0x14)
+    for _, f in ipairs(FONT_LIST) do
+        local path = dir .. "\\" .. f.file
+        if doesFileExist(path) then
+            FONT_AVAILABLE[#FONT_AVAILABLE + 1] = { key = f.key, name = f.name, path = path }
+        end
+    end
+end)
+
+local function clamp(x, lo, hi)
+    return math.max(lo, math.min(hi, x))
+end
+
+local function accent_vec(mult, alpha)
+    local a = UI_CFG.accent
+    local m = mult or 1.0
+    return imgui.ImVec4(math.min(1, a[1] * m), math.min(1, a[2] * m), math.min(1, a[3] * m), alpha or 1.0)
+end
+
+-- ===================== Оформление: цвета, рамка с переливами, тень =====================
+local function col32(r, g, b, a)
+    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a))
+end
+
+local function hsv_to_rgb(h, s, v)
+    h = h % 1
+    local i = math.floor(h * 6)
+    local f = h * 6 - i
+    local p, q, t = v * (1 - s), v * (1 - f * s), v * (1 - (1 - f) * s)
+    i = i % 6
+    if i == 0 then return v, t, p
+    elseif i == 1 then return q, v, p
+    elseif i == 2 then return p, v, t
+    elseif i == 3 then return p, q, v
+    elseif i == 4 then return t, p, v
+    end
+    return v, p, q
+end
+
+local function rgb_to_hsv(r, g, b)
+    local mx, mn = math.max(r, g, b), math.min(r, g, b)
+    local d = mx - mn
+    local h = 0
+    if d > 0 then
+        if mx == r then h = ((g - b) / d) % 6
+        elseif mx == g then h = (b - r) / d + 2
+        else h = (r - g) / d + 4 end
+        h = h / 6
+    end
+    return h, (mx == 0) and 0 or d / mx, mx
+end
+
+-- тёмный цвет с лёгким оттенком акцента
+local function dark(l, a)
+    local ac = UI_CFG.accent
+    return imgui.ImVec4(math.min(1, l + ac[1] * 0.04), math.min(1, l + ac[2] * 0.04), math.min(1, l + ac[3] * 0.06), a or 1.0)
+end
+
+-- тёмный цвет, подмешанный к акценту (k от 0 до 1)
+local function blend(l, k, a)
+    local ac = UI_CFG.accent
+    local d = dark(l)
+    return imgui.ImVec4(d.x + (ac[1] - d.x) * k, d.y + (ac[2] - d.y) * k, d.z + (ac[3] - d.z) * k, a or 1.0)
+end
+
+-- список для рисования поверх окон; если нет, берём запасной
+local function fg_list(fallback)
+    if imgui.GetForegroundDrawList then
+        local ok, dl = pcall(imgui.GetForegroundDrawList)
+        if ok and dl ~= nil then return dl end
+    end
+    return fallback()
+end
+
+local function rounded_path(x0, y0, x1, y1, r)
+    local xs, ys = {}, {}
+    local function add(x, y) xs[#xs + 1] = x; ys[#ys + 1] = y end
+    local function line(ax, ay, bx, by)
+        local len = math.sqrt((bx - ax) ^ 2 + (by - ay) ^ 2)
+        local n = math.max(1, math.floor(len / 14))
+        for i = 0, n - 1 do
+            local t = i / n
+            add(ax + (bx - ax) * t, ay + (by - ay) * t)
+        end
+    end
+    local function arc(cx, cy, a0)
+        for i = 0, 5 do
+            local a = a0 + (math.pi / 2) * (i / 5)
+            add(cx + math.cos(a) * r, cy + math.sin(a) * r)
+        end
+    end
+    line(x0 + r, y0, x1 - r, y0)
+    arc(x1 - r, y0 + r, -math.pi / 2)
+    line(x1, y0 + r, x1, y1 - r)
+    arc(x1 - r, y1 - r, 0)
+    line(x1 - r, y1, x0 + r, y1)
+    arc(x0 + r, y1 - r, math.pi / 2)
+    line(x0, y1 - r, x0, y0 + r)
+    arc(x0 + r, y0 + r, math.pi)
+    return xs, ys
+end
+
+-- рамка: 1 = переливы цвета акцента, 2 = радуга, 3 = статичная
+local function draw_border(x0, y0, x1, y1)
+    local xs, ys = rounded_path(x0 + 1, y0 + 1, x1 - 1, y1 - 1, 12)
+    local n = #xs
+    local pts = {}
+    for i = 1, n do pts[i] = imgui.ImVec2(xs[i], ys[i]) end
+    local dl = fg_list(imgui.GetWindowDrawList)
+    local ac = UI_CFG.accent
+    local mode = UI_CFG.border_mode
+    local t = os.clock() * UI_CFG.border_speed
+    local lr, lg, lb = 1, 1, 1
+    if mode == 1 then
+        local h, sat = rgb_to_hsv(ac[1], ac[2], ac[3])
+        lr, lg, lb = hsv_to_rgb(h + 0.08, math.max(0.35, sat * 0.75), 1.0)
+    end
+    for i = 1, n do
+        local j = i % n + 1
+        local f = (i - 1) / n
+        local r, g, b
+        if mode == 1 then
+            local w = 0.5 + 0.5 * math.sin((f * 2 - t * 0.6) * math.pi * 2)
+            local dr, dg, db = ac[1] * 0.55, ac[2] * 0.55, ac[3] * 0.55
+            r, g, b = dr + (lr - dr) * w, dg + (lg - dg) * w, db + (lb - db) * w
+        elseif mode == 2 then
+            r, g, b = hsv_to_rgb(f - t * 0.3, 0.75, 1.0)
+        else
+            r, g, b = ac[1], ac[2], ac[3]
+        end
+        dl:AddLine(pts[i], pts[j], col32(r, g, b, 0.16), 5.0)
+        dl:AddLine(pts[i], pts[j], col32(r, g, b, 0.95), 2.0)
+    end
+end
+
+-- тень и рамка главного окна; при любой ошибке эффекты просто отключаются
+local border_broken = false
+local function draw_window_fx(x0, y0, x1, y1)
+    if border_broken then return end
+    local ok, err = pcall(function()
+        if UI_CFG.shadow then
+            local bl = imgui.GetBackgroundDrawList()
+            for i = 1, 6 do
+                local e = i * 3
+                bl:AddRectFilled(imgui.ImVec2(x0 - e, y0 - e + 5), imgui.ImVec2(x1 + e, y1 + e + 5), col32(0, 0, 0, 0.045), 12 + e)
+            end
+        end
+        if UI_CFG.border_mode ~= 0 then draw_border(x0, y0, x1, y1) end
+    end)
+    if not ok then
+        border_broken = true
+        log_error("window_fx", err)
+    end
+end
+
+function apply_theme()
+    local style = imgui.GetStyle()
+    local clr = style.Colors
+    local ac = UI_CFG.accent
+    local function sets(name, v) pcall(function() style[name] = v end) end
+    local function setc(name, v)
+        local idx = imgui.Col[name]
+        if idx ~= nil then clr[idx] = v end
+    end
+    -- размеры (отступы не меняем: вёрстка окон рассчитана на них)
+    sets("WindowPadding", imgui.ImVec2(5, 5))
+    sets("FramePadding", imgui.ImVec2(5, 5))
+    sets("ItemSpacing", imgui.ImVec2(5, 5))
+    sets("ItemInnerSpacing", imgui.ImVec2(2, 2))
+    sets("WindowTitleAlign", imgui.ImVec2(0.5, 0.5))
+    sets("ScrollbarSize", 10)
+    sets("WindowBorderSize", 0)
+    sets("PopupBorderSize", 0)
+    sets("ChildBorderSize", 1)
+    sets("FrameBorderSize", 0)
+    -- скругления
+    sets("WindowRounding", 12)
+    sets("ChildRounding", 8)
+    sets("FrameRounding", 6)
+    sets("PopupRounding", 10)
+    sets("ScrollbarRounding", 8)
+    sets("GrabRounding", 6)
+    sets("TabRounding", 6)
+    -- цвета
+    setc("Text", imgui.ImVec4(0.93, 0.94, 0.97, 1.00))
+    setc("TextDisabled", imgui.ImVec4(0.52, 0.55, 0.62, 1.00))
+    setc("WindowBg", dark(0.058, UI_CFG.opacity))
+    setc("ChildBg", dark(0.080, 0.50))
+    setc("PopupBg", dark(0.085, 0.98))
+    setc("Border", imgui.ImVec4(ac[1], ac[2], ac[3], 0.20))
+    setc("TitleBg", dark(0.058))
+    setc("TitleBgActive", dark(0.058))
+    setc("TitleBgCollapsed", dark(0.058))
+    setc("FrameBg", dark(0.105))
+    setc("FrameBgHovered", blend(0.105, 0.14))
+    setc("FrameBgActive", blend(0.105, 0.22))
+    setc("Button", dark(0.115))
+    setc("ButtonHovered", blend(0.115, 0.30))
+    setc("ButtonActive", blend(0.115, 0.50))
+    setc("Header", blend(0.115, 0.22))
+    setc("HeaderHovered", blend(0.115, 0.34))
+    setc("HeaderActive", blend(0.115, 0.48))
+    setc("ScrollbarBg", imgui.ImVec4(0, 0, 0, 0))
+    setc("ScrollbarGrab", blend(0.12, 0.30))
+    setc("ScrollbarGrabHovered", blend(0.12, 0.50))
+    setc("ScrollbarGrabActive", blend(0.12, 0.75))
+    setc("Separator", imgui.ImVec4(1, 1, 1, 0.07))
+    setc("ModalWindowDimBg", imgui.ImVec4(0, 0, 0, 0.65))
+    setc("CheckMark", accent_vec(1.15))
+    setc("SliderGrab", accent_vec(1.0))
+    setc("SliderGrabActive", accent_vec(1.25))
+    setc("PlotHistogram", accent_vec(1.0))
+    setc("TextSelectedBg", imgui.ImVec4(ac[1], ac[2], ac[3], 0.35))
 end
 
 -- ===================== Левая панель и калькулятор =====================
@@ -165,6 +508,90 @@ local calc_fresh = false
 local function ic(name, fallback)
     return fa[name] or fallback
 end
+
+-- ===================== Всплывающие уведомления =====================
+local toasts = {}
+local TOAST_KINDS = {
+    info = { icon = "CIRCLE_INFO",          color = nil },
+    ok   = { icon = "CIRCLE_CHECK",         color = {0.30, 0.78, 0.45} },
+    warn = { icon = "TRIANGLE_EXCLAMATION", color = {1.00, 0.75, 0.20} },
+    err  = { icon = "CIRCLE_XMARK",         color = {0.92, 0.32, 0.32} },
+}
+
+local toast_broken = false
+
+local function toast(text, kind, dur)
+    if UI_CFG.toasts == false or toast_broken then return false end
+    toasts[#toasts + 1] = { text = tostring(text), kind = TOAST_KINDS[kind] and kind or "info", t0 = os.clock(), dur = dur or 3.5 }
+    if #toasts > 5 then table.remove(toasts, 1) end
+    return true
+end
+
+-- уведомление: всплывающая карточка, а если они выключены - обычное сообщение в чат
+local function notify(text, kind, dur)
+    if not toast(text, kind, dur) then
+        if sampAddChatMessage then
+            pcall(sampAddChatMessage, u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}" .. tostring(text)), -1)
+        end
+    end
+end
+
+-- карточки рисуются прямо на экране (без отдельных окон ImGui), поэтому ломать стек окон им нечем
+local function draw_toasts()
+    local now = os.clock()
+    for i = #toasts, 1, -1 do
+        if now - toasts[i].t0 > toasts[i].dur then table.remove(toasts, i) end
+    end
+    if #toasts == 0 then return end
+    local dl = fg_list(imgui.GetBackgroundDrawList)
+    local sw, sh = getScreenResolution()
+    local corner = UI_CFG.toast_corner or 3 -- 0 слева сверху, 1 справа сверху, 2 слева снизу, 3 справа снизу
+    local right = (corner == 1 or corner == 3)
+    local bottom = (corner == 2 or corner == 3)
+    local H, GAP, MARGIN = 46, 8, 20
+    for i, t in ipairs(toasts) do
+        local kind = TOAST_KINDS[t.kind] or TOAST_KINDS.info
+        local icon = ic(kind.icon, "")
+        local ts = imgui.CalcTextSize(t.text)
+        local w = math.min(760, ts.x + 74)
+        local age = now - t.t0
+        local pr = math.min(1, age / 0.25)
+        local ease = 1 - (1 - pr) ^ 3
+        local alpha = math.max(0, math.min(1, (t.dur - age) / 0.4))
+        local off = (1 - ease) * (w + MARGIN + 10)
+        local slot = #toasts - i
+        local x = right and (sw - MARGIN - w + off) or (MARGIN - off)
+        local y = bottom and (sh - MARGIN - 80 - H - slot * (H + GAP)) or (MARGIN + slot * (H + GAP))
+        local c = kind.color or UI_CFG.accent
+        local ty = y + (H - ts.y) / 2
+        local isz = imgui.CalcTextSize(icon)
+        local p0, p1 = imgui.ImVec2(x, y), imgui.ImVec2(x + w, y + H)
+        dl:AddRectFilled(p0, p1, col32(0.07, 0.075, 0.09, 0.96 * alpha), 10)
+        pcall(function()
+            dl:AddRect(p0, p1, col32(c[1], c[2], c[3], 0.60 * alpha), 10, 0, 1.5)
+            dl:AddCircleFilled(imgui.ImVec2(x + 25, y + H / 2), 14, col32(c[1], c[2], c[3], 0.18 * alpha), 24)
+        end)
+        dl:AddText(imgui.ImVec2(x + 25 - isz.x / 2, y + (H - isz.y) / 2), col32(c[1], c[2], c[3], alpha), icon)
+        dl:AddText(imgui.ImVec2(x + 50, ty), col32(1, 1, 1, alpha), t.text)
+    end
+end
+
+local toast_frame
+toast_frame = imgui.OnFrame(
+    function()
+        toast_frame.HideCursor = true
+        return #toasts > 0
+    end,
+    function()
+        local ok, err = xpcall(draw_toasts, tb)
+        if not ok then
+            toast_broken = true
+            toasts = {}
+            log_error("toast", err)
+            queue_notice("Карточки уведомлений отключены из-за ошибки, сообщения будут в чате", "warn")
+        end
+    end
+)
 
 -- CALC_LOGIC_BEGIN
 local function group_digits(s)
@@ -375,20 +802,29 @@ local function calc_equals()
 end
 -- CALC_LOGIC_END
 
+local function draw_sidebar_bg(wpos)
+    local dl = imgui.GetWindowDrawList()
+    local col = imgui.ColorConvertFloat4ToU32(dark(0.088, 1.0))
+    dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), col, 12)
+    dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), col)
+    dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 492), imgui.GetColorU32(imgui.Col.Separator), 1.0)
+end
+
 local function sidebar_tab(label, id)
     local active = (current_tab == id)
     if active then
-        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.21, 0.21, 0.22, 1.00))
+        imgui.PushStyleColor(imgui.Col.Button, blend(0.115, 0.28))
     end
     imgui.SetWindowFontScale(1.15)
-    if imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, 46)) then
+    if imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, 42)) then
         current_tab = id
     end
     imgui.SetWindowFontScale(1.0)
     if active then
         imgui.PopStyleColor(1)
         local rmin, rmax = imgui.GetItemRectMin(), imgui.GetItemRectMax()
-        imgui.GetWindowDrawList():AddRectFilled(rmin, imgui.ImVec2(rmin.x + 3, rmax.y), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.18, 0.45, 0.85, 1.00)))
+        local mid = (rmin.y + rmax.y) / 2
+        imgui.GetWindowDrawList():AddRectFilled(imgui.ImVec2(rmin.x + 2, mid - 13), imgui.ImVec2(rmin.x + 5, mid + 13), imgui.ColorConvertFloat4ToU32(accent_vec(1.15)), 2)
     end
 end
 
@@ -399,7 +835,7 @@ local function draw_calculator()
     imgui.Text(ic("CALCULATOR", "") .. " Калькулятор")
     imgui.SameLine(606)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
-    if imgui.Button(fa.CIRCLE_XMARK .. "##close_calc", imgui.ImVec2(24, 24)) then
+    if imgui.Button(FA.CIRCLE_XMARK .. "##close_calc", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
     imgui.PopStyleColor(1)
@@ -462,9 +898,9 @@ local function draw_calculator()
                 imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.25, 0.25, 0.27, 1.00))
                 pushed = true
             elseif style == 2 then
-                imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.18, 0.45, 0.85, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.22, 0.52, 0.92, 1.00))
-                imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.15, 0.38, 0.75, 1.00))
+                imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
+                imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.15))
+                imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(0.85))
                 pushed = true
             elseif style == 3 then
                 imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.55, 0.18, 0.18, 1.00))
@@ -483,32 +919,43 @@ end
 
 -- ===================== Новые разделы: PayDay, фразы, о скрипте =====================
 local settings_path = getWorkingDirectory() .. "\\config\\arizona_prices_settings.json"
-local settings = { payday = { enabled = false, x = 20, y = 300 }, phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
+local settings = { ui = UI_CFG, payday = { enabled = false, x = 20, y = 300 }, phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
 
 local function load_settings()
-    if doesFileExist(settings_path) then
-        local f = io.open(settings_path, "r")
-        if f then
-            local content = f:read("*a")
-            f:close()
-            local ok, data = pcall(decodeJson, content)
-            if ok and type(data) == "table" then
-                if type(data.payday) == "table" then
-                    settings.payday.enabled = (data.payday.enabled == true)
-                    settings.payday.x = tonumber(data.payday.x) or 20
-                    settings.payday.y = tonumber(data.payday.y) or 300
-                end
-                if type(data.phrases) == "table" then
-                    settings.phrases = data.phrases
-                end
-                if type(data.clock) == "table" then
-                    settings.clock.enabled = (data.clock.enabled == true)
-                    if type(data.clock.country) == "string" then settings.clock.country = data.clock.country end
-                    settings.clock.x = tonumber(data.clock.x) or 20
-                    settings.clock.y = tonumber(data.clock.y) or 340
-                end
-            end
+    local data = safe_read_json(settings_path)
+    if not data then return end
+    if type(data.payday) == "table" then
+        settings.payday.enabled = (data.payday.enabled == true)
+        settings.payday.x = tonumber(data.payday.x) or 20
+        settings.payday.y = tonumber(data.payday.y) or 300
+    end
+    if type(data.phrases) == "table" then
+        local ph = {}
+        for _, v in ipairs(data.phrases) do
+            if type(v) == "string" and v ~= "" then ph[#ph + 1] = v end
         end
+        settings.phrases = ph
+    end
+    if type(data.clock) == "table" then
+        settings.clock.enabled = (data.clock.enabled == true)
+        if type(data.clock.country) == "string" then settings.clock.country = data.clock.country end
+        settings.clock.x = tonumber(data.clock.x) or 20
+        settings.clock.y = tonumber(data.clock.y) or 340
+    end
+    if type(data.ui) == "table" then
+        local u = data.ui
+        if type(u.accent) == "table" and tonumber(u.accent[1]) and tonumber(u.accent[2]) and tonumber(u.accent[3]) then
+            UI_CFG.accent = { clamp(tonumber(u.accent[1]), 0, 1), clamp(tonumber(u.accent[2]), 0, 1), clamp(tonumber(u.accent[3]), 0, 1) }
+        end
+        UI_CFG.opacity = clamp(tonumber(u.opacity) or 1.0, 0.3, 1.0)
+        UI_CFG.overlay_scale = clamp(tonumber(u.overlay_scale) or 1.0, 0.7, 2.0)
+        UI_CFG.open_key = math.max(0, math.floor(tonumber(u.open_key) or 0))
+        UI_CFG.toasts = (u.toasts ~= false)
+        UI_CFG.toast_corner = clamp(math.floor(tonumber(u.toast_corner) or 3), 0, 3)
+        UI_CFG.border_mode = clamp(math.floor(tonumber(u.border_mode) or 1), 0, 3)
+        UI_CFG.border_speed = clamp(tonumber(u.border_speed) or 1.0, 0.2, 3.0)
+        UI_CFG.shadow = (u.shadow ~= false)
+        if type(u.font) == "string" then UI_CFG.font = u.font end
     end
 end
 
@@ -517,14 +964,13 @@ local function save_settings()
     if not doesDirectoryExist(dir) then
         createDirectory(dir)
     end
-    local f = io.open(settings_path, "w")
-    if f then
-        f:write(encodeJson(settings))
-        f:close()
+    local ok, json = pcall(encodeJson, settings)
+    if ok and type(json) == "string" and json ~= "" then
+        safe_write(settings_path, json)
     end
 end
 
-load_settings()
+safe_call("load_settings", load_settings)
 
 local payday_on = imgui.new.bool(settings.payday.enabled)
 local payday_edit = false
@@ -557,7 +1003,7 @@ local function section_header(icon, title)
     imgui.Text(icon .. " " .. title)
     imgui.SameLine(606)
     imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
-    if imgui.Button(fa.CIRCLE_XMARK .. "##close_section", imgui.ImVec2(24, 24)) then
+    if imgui.Button(FA.CIRCLE_XMARK .. "##close_section", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
     imgui.PopStyleColor(1)
@@ -585,13 +1031,13 @@ local function draw_payday_tab()
             end
         else
             imgui.TextColored(imgui.ImVec4(0.45, 1.00, 0.55, 1.00), "Перетащи надпись мышкой, затем нажми «Сохранить».")
-            if imgui.Button(fa.FLOPPY_DISK .. " Сохранить положение", imgui.ImVec2(260, 38)) then
+            if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение", imgui.ImVec2(260, 38)) then
                 settings.payday.x = payday_pos.x
                 settings.payday.y = payday_pos.y
                 settings.payday.enabled = payday_on[0]
                 save_settings()
                 payday_edit = false
-                sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Положение надписи сохранено."), -1)
+                notify("Положение надписи сохранено", "ok")
             end
         end
         imgui.Spacing()
@@ -605,7 +1051,7 @@ local function draw_phrases_tab()
     imgui.SetNextItemWidth(imgui.GetContentRegionAvail().x - 125)
     local enter = imgui.InputTextWithHint("##phrase_input", "Введи фразу или команду (например /time)", phrase_buf, ffi.sizeof(phrase_buf), imgui.InputTextFlags.EnterReturnsTrue)
     imgui.SameLine()
-    local add_clicked = imgui.Button(fa.CIRCLE_PLUS .. " Добавить##add_phrase", imgui.ImVec2(120, 0))
+    local add_clicked = imgui.Button(FA.CIRCLE_PLUS .. " Добавить##add_phrase", imgui.ImVec2(120, 0))
     if enter or add_clicked then
         local text = ffi.string(phrase_buf)
         if text:gsub("%s", "") ~= "" then
@@ -621,12 +1067,13 @@ local function draw_phrases_tab()
         end
         local to_remove = nil
         for i, phrase in ipairs(settings.phrases) do
-            if imgui.Button(fa.PAPER_PLANE .. "##send_phrase_" .. i, imgui.ImVec2(36, 28)) then
-                sampSendChat(u8:decode(phrase))
+            if imgui.Button(FA.PAPER_PLANE .. "##send_phrase_" .. i, imgui.ImVec2(36, 28)) then
+                local txt = phrase
+                defer(function() sampSendChat(u8:decode(txt)) end)
             end
             if imgui.IsItemHovered() then imgui.SetTooltip("Отправить в чат") end
             imgui.SameLine()
-            if imgui.Button(fa.TRASH_CAN .. "##del_phrase_" .. i, imgui.ImVec2(36, 28)) then
+            if imgui.Button(FA.TRASH_CAN .. "##del_phrase_" .. i, imgui.ImVec2(36, 28)) then
                 to_remove = i
             end
             if imgui.IsItemHovered() then imgui.SetTooltip("Удалить фразу") end
@@ -669,7 +1116,7 @@ local function draw_about_tab()
                     open_url(l.url)
                 elseif l.copy then
                     imgui.SetClipboardText(l.copy)
-                    sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Ник скопирован: {33AAFF}" .. l.copy), -1)
+                    notify("Ник скопирован: " .. l.copy, "ok")
                 end
             end
             local rmin, rmax = imgui.GetItemRectMin(), imgui.GetItemRectMax()
@@ -829,7 +1276,7 @@ local function draw_time_tab()
             if not clock_edit then
                 if imgui.Button("Передвинуть##clock_move") then clock_edit = true end
             else
-                if imgui.Button(fa.FLOPPY_DISK .. " Сохранить положение##clock_save") then
+                if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение##clock_save") then
                     settings.clock.x = clock_pos.x
                     settings.clock.y = clock_pos.y
                     save_settings()
@@ -857,14 +1304,15 @@ local function draw_time_tab()
                 local ctm = country_time(c)
                 local active = (i == selected_country)
                 if active then
-                    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.18, 0.45, 0.85, 1.00))
+                    imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
                 end
                 if imgui.Button(c.name .. "\n" .. ctm .. "###country_" .. i, imgui.ImVec2(bw, 44)) then
                     selected_country = i
                     pending_clock_index = i
                     pending_clock_open = true
                     local ntm, ndt = country_time(c)
-                    sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Время (" .. c.name .. "): {33AAFF}" .. ntm .. " {FFFFFF}(" .. ndt .. ")"), -1)
+                    local chat_msg = u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Время (" .. c.name .. "): {33AAFF}" .. ntm .. " {FFFFFF}(" .. ndt .. ")")
+                    defer(function() sampAddChatMessage(chat_msg, -1) end)
                 end
                 if active then imgui.PopStyleColor(1) end
             end
@@ -891,7 +1339,7 @@ local function draw_time_tab()
                 imgui.CloseCurrentPopup()
             end
             imgui.SameLine()
-            if imgui.Button(fa.CIRCLE_XMARK .. " Нет##clock_no", imgui.ImVec2(half, 34)) then
+            if imgui.Button(FA.CIRCLE_XMARK .. " Нет##clock_no", imgui.ImVec2(half, 34)) then
                 imgui.CloseCurrentPopup()
             end
             imgui.EndPopup()
@@ -906,7 +1354,7 @@ clock_frame = imgui.OnFrame(
         clock_frame.HideCursor = not clock_edit
         return settings.clock.enabled
     end,
-    function()
+    guard_frame("clock", function()
         if clock_edit and not main_window[0] then clock_edit = false end
         local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.AlwaysAutoResize, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
         if not clock_edit then
@@ -915,6 +1363,7 @@ clock_frame = imgui.OnFrame(
         end
         imgui.SetNextWindowBgAlpha(0.45)
         imgui.Begin("##clock_overlay", nil, flags)
+        imgui.SetWindowFontScale(UI_CFG.overlay_scale)
         local c = find_country(settings.clock.country)
         shadow_text(imgui.ImVec4(0.55, 0.85, 1.00, 1.00), c.name .. ": " .. country_time(c))
         if clock_edit then
@@ -922,11 +1371,11 @@ clock_frame = imgui.OnFrame(
             clock_pos.x, clock_pos.y = pos.x, pos.y
         end
         imgui.End()
-    end
+    end, function() settings.clock.enabled = false end)
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.2"
+local SCRIPT_VERSION = "1.5"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -970,14 +1419,12 @@ end
 
 local function save_state()
     if not doesDirectoryExist(cfg_dir) then createDirectory(cfg_dir) end
-    write_file(state_path, encodeJson(state))
+    safe_write(state_path, encodeJson(state))
 end
 
-load_state()
+safe_call("load_state", load_state)
 
 local auto_prices_cb = imgui.new.bool(state.auto_prices)
-local outdated_popup = imgui.new.bool(false)
-local prev_main_open = false
 
 local function version_newer(remote, current)
     local a, b = {}, {}
@@ -1027,12 +1474,11 @@ local function handle_version()
     local v = c and c:match("%d[%d%.]*")
     if v and version_newer(v, SCRIPT_VERSION) then
         if not update_info.available then
-            sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Вышла новая версия {33AAFF}" .. v .. "{FFFFFF}! Откройте /prices и нажмите «Обновить»."), -1)
+            notify("Вышла новая версия " .. v .. "! Откройте /prices и нажмите «Обновить»", "info", 8)
         end
         update_info.available = true
         update_info.version = v
         update_info.status = ""
-        if main_window[0] then outdated_popup[0] = true end
     elseif manual_check then
         update_info.status = v and "У вас последняя версия" or "Не удалось проверить"
     end
@@ -1047,7 +1493,7 @@ local function handle_script()
         update_info.status = "Ошибка загрузки"
         return
     end
-    if not loadstring(c) then
+    if not loadstring(c) or not c:find("SCRIPT_VERSION", 1, true) then
         update_info.status = "Файл повреждён"
         return
     end
@@ -1099,7 +1545,7 @@ local function handle_prices()
     save_state()
     if added + changed > 0 then
         save_data()
-        sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Цены обновлены: новых " .. added .. ", изменено " .. changed .. "."), -1)
+        notify("Цены обновлены: новых " .. added .. ", изменено " .. changed, "ok", 5)
     end
 end
 
@@ -1113,6 +1559,8 @@ local function process_updates()
     end
 end
 
+local outdated_popup = imgui.new.bool(false)
+
 local function start_update()
     update_info.busy = true
     update_info.status = ""
@@ -1121,6 +1569,13 @@ local function start_update()
         update_info.busy = false
         if update_info.status == "" then update_info.status = "Ошибка загрузки" end
     end
+end
+
+local function request_update()
+    update_info.busy = true
+    update_info.status = ""
+    busy_since = os.time()
+    defer(start_update)
 end
 
 local function draw_update_block()
@@ -1133,13 +1588,13 @@ local function draw_update_block()
         if update_info.busy then
             imgui.TextDisabled("Скачивание...")
         elseif imgui.Button(ic("DOWNLOAD", "") .. " Обновить##do_update", imgui.ImVec2(SIDEBAR_W - 10, 32)) then
-            start_update()
+            request_update()
         end
     else
         if imgui.Button(ic("ARROWS_ROTATE", "") .. " Проверить##check_update", imgui.ImVec2(SIDEBAR_W - 10, 28)) then
             manual_check = true
             update_info.status = "Проверка..."
-            start_checks()
+            defer(start_checks)
         end
     end
     if update_info.status ~= "" then
@@ -1150,8 +1605,288 @@ local function draw_update_block()
     if imgui.Checkbox(" Автообновление цен##auto_prices", auto_prices_cb) then
         state.auto_prices = auto_prices_cb[0]
         save_state()
-        if state.auto_prices then start_checks() end
+        if state.auto_prices then defer(start_checks) end
     end
+end
+
+-- ===================== Настройки, отчёт об ошибке, горячая клавиша =====================
+local hk = { binding = false, typing = false }
+local vkeys_ok, vkeys = pcall(require, 'vkeys')
+
+local function key_name(code)
+    if not code or code == 0 then return "Не задана" end
+    if vkeys_ok and vkeys.id_to_name then
+        local n = vkeys.id_to_name(code)
+        if n then return n end
+    end
+    return "VK " .. tostring(code)
+end
+
+local sui = {
+    accent = imgui.new.float[3](UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3]),
+    opacity = imgui.new.float(UI_CFG.opacity),
+    scale = imgui.new.float(UI_CFG.overlay_scale),
+    toasts = imgui.new.bool(UI_CFG.toasts),
+    border_speed = imgui.new.float(UI_CFG.border_speed),
+    shadow = imgui.new.bool(UI_CFG.shadow),
+    font_pending = false,
+}
+
+local ui_dirty_at = nil
+local function mark_ui_dirty()
+    ui_dirty_at = os.clock()
+end
+
+local function flush_ui_save(force)
+    if ui_dirty_at and (force or os.clock() - ui_dirty_at > 0.8) then
+        ui_dirty_at = nil
+        save_settings()
+    end
+end
+
+local function toggle_menu()
+    main_window[0] = not main_window[0]
+    if main_window[0] and update_info.available then
+        outdated_popup[0] = true
+    end
+end
+
+local function on_window_message(msg, wparam, lparam)
+    if msg ~= 0x100 and msg ~= 0x104 then return end
+    local is_repeat = bit.band(lparam, 0x40000000) ~= 0
+
+    if hk.binding then
+        consumeWindowMessage(true, true)
+        if is_repeat then return end
+        hk.binding = false
+        if wparam == 0x08 then
+            UI_CFG.open_key = 0
+            mark_ui_dirty()
+            notify("Горячая клавиша убрана", "info")
+        elseif wparam ~= 0x1B then
+            UI_CFG.open_key = wparam
+            mark_ui_dirty()
+            notify("Клавиша открытия меню: " .. key_name(wparam), "ok")
+        end
+        return
+    end
+
+    if is_repeat then return end
+    local key = UI_CFG.open_key
+    if key and key ~= 0 and wparam == key then
+        local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
+        if okc and busy then return end
+        if main_window[0] and hk.typing then return end
+        toggle_menu()
+    end
+end
+
+local function build_report()
+    local lines = {}
+    local function add(t) lines[#lines + 1] = t end
+    add("Arizona Prices - отчёт об ошибке")
+    add("Версия скрипта: " .. SCRIPT_VERSION)
+    add("Журнал ошибок: moonloader\\config\\arizona_prices_errors.log")
+    add("Дата: " .. os.date("%Y-%m-%d %H:%M:%S"))
+    local okv, mv = pcall(function() return getMoonloaderVersion() end)
+    add("MoonLoader: " .. (okv and tostring(mv) or "?"))
+    add("Lua: " .. tostring(_VERSION) .. (jit and (" / " .. tostring(jit.version)) or ""))
+    local okr, rw, rh = pcall(getScreenResolution)
+    add("Экран: " .. (okr and (tostring(rw) .. "x" .. tostring(rh)) or "?"))
+    add("Предметов в списке: " .. #items_list)
+    add("Автообновление цен: " .. tostring(state.auto_prices))
+    add("Загрузка файлов: " .. ((downloadUrlToFile and dlstatus) and "доступна" or "недоступна"))
+    add("Уведомления: " .. tostring(UI_CFG.toasts) .. ", горячая клавиша: " .. key_name(UI_CFG.open_key))
+    if #err_log > 0 then
+        add("Последние ошибки:")
+        for _, e in ipairs(err_log) do add("  " .. e) end
+    else
+        add("Ошибок в журнале нет")
+    end
+    add("")
+    add("Что вы делали перед ошибкой:")
+    return table.concat(lines, "\n")
+end
+
+local function send_bug_report()
+    local ok, text = pcall(build_report)
+    imgui.SetClipboardText(ok and text or ("Arizona Prices " .. SCRIPT_VERSION))
+    open_url("https://t.me/obrezik")
+    notify("Данные для разработчика скопированы - вставьте их в сообщение (Ctrl+V)", "ok", 6)
+end
+
+local THEMES = {
+    { name = "Океан",   c = {0.18, 0.45, 0.85} }, { name = "Изумруд", c = {0.20, 0.70, 0.45} },
+    { name = "Аметист", c = {0.60, 0.35, 0.90} }, { name = "Рубин",   c = {0.90, 0.30, 0.35} },
+    { name = "Янтарь",  c = {0.95, 0.60, 0.15} }, { name = "Бирюза",  c = {0.15, 0.72, 0.78} },
+    { name = "Сакура",  c = {0.90, 0.40, 0.70} }, { name = "Неон",    c = {0.55, 1.00, 0.20} },
+}
+local BORDER_MODES = { "Выключена", "Переливы цвета", "Радуга", "Статичная" }
+
+local CORNERS = {
+    { name = "Справа снизу", v = 3 }, { name = "Справа сверху", v = 1 },
+    { name = "Слева снизу", v = 2 }, { name = "Слева сверху", v = 0 },
+}
+
+local function sub_title(icon_name, text)
+    imgui.Spacing()
+    imgui.TextColored(accent_vec(1.2), ic(icon_name, "") .. " " .. text)
+    imgui.Separator()
+    imgui.Spacing()
+end
+
+local function draw_settings_tab()
+    section_header(ic("GEAR", ""), "Настройки")
+    if imgui.BeginChild("##settings_child", imgui.ImVec2(-1, 421), true) then
+        sub_title("PALETTE", "Темы оформления")
+        for i, th in ipairs(THEMES) do
+            local c = th.c
+            imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(c[1] * 0.55, c[2] * 0.55, c[3] * 0.55, 1.0))
+            imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(c[1] * 0.80, c[2] * 0.80, c[3] * 0.80, 1.0))
+            imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(c[1], c[2], c[3], 1.0))
+            if imgui.Button(th.name .. "##theme" .. i, imgui.ImVec2(110, 30)) then
+                UI_CFG.accent = { c[1], c[2], c[3] }
+                sui.accent[0], sui.accent[1], sui.accent[2] = c[1], c[2], c[3]
+                apply_theme()
+                mark_ui_dirty()
+            end
+            imgui.PopStyleColor(3)
+            if i % 4 ~= 0 and i < #THEMES then imgui.SameLine() end
+        end
+        imgui.Spacing()
+        if imgui.ColorEdit3("Свой цвет##accent_custom", sui.accent, imgui.ColorEditFlags.NoInputs) then
+            UI_CFG.accent = { sui.accent[0], sui.accent[1], sui.accent[2] }
+            apply_theme()
+            mark_ui_dirty()
+        end
+        imgui.SetNextItemWidth(260)
+        if imgui.SliderFloat("Прозрачность окна##opacity", sui.opacity, 0.3, 1.0, "%.2f") then
+            UI_CFG.opacity = sui.opacity[0]
+            apply_theme()
+            mark_ui_dirty()
+        end
+
+        sub_title("WAND_MAGIC_SPARKLES", "Рамка и эффекты")
+        imgui.SetNextItemWidth(220)
+        if imgui.BeginCombo("Рамка окна##border_mode", BORDER_MODES[UI_CFG.border_mode + 1] or BORDER_MODES[2]) then
+            for i, name in ipairs(BORDER_MODES) do
+                if imgui.Selectable(name .. "##bm" .. i, UI_CFG.border_mode == i - 1) then
+                    UI_CFG.border_mode = i - 1
+                    mark_ui_dirty()
+                end
+            end
+            imgui.EndCombo()
+        end
+        if UI_CFG.border_mode == 1 or UI_CFG.border_mode == 2 then
+            imgui.SetNextItemWidth(260)
+            if imgui.SliderFloat("Скорость переливов##border_speed", sui.border_speed, 0.2, 3.0, "%.1f") then
+                UI_CFG.border_speed = sui.border_speed[0]
+                mark_ui_dirty()
+            end
+        end
+        if imgui.Checkbox("Тень под окном##shadow", sui.shadow) then
+            UI_CFG.shadow = sui.shadow[0]
+            mark_ui_dirty()
+        end
+
+        sub_title("FONT", "Шрифт")
+        local font_name = FONT_AVAILABLE[1].name
+        for _, f in ipairs(FONT_AVAILABLE) do
+            if f.key == UI_CFG.font then font_name = f.name end
+        end
+        imgui.SetNextItemWidth(260)
+        if imgui.BeginCombo("Шрифт интерфейса##font", font_name) then
+            for _, f in ipairs(FONT_AVAILABLE) do
+                if imgui.Selectable(f.name .. "##font_" .. f.key, UI_CFG.font == f.key) then
+                    UI_CFG.font = f.key
+                    sui.font_pending = true
+                    mark_ui_dirty()
+                end
+            end
+            imgui.EndCombo()
+        end
+        if sui.font_pending then
+            if imgui.Button(ic("ARROWS_ROTATE", "") .. " Применить шрифт (перезапуск скрипта)##apply_font", imgui.ImVec2(360, 28)) then
+                defer(function()
+                    flush_ui_save(true)
+                    thisScript():reload()
+                end)
+            end
+        else
+            imgui.TextDisabled("Шрифт меняется после перезапуска скрипта. Берётся из папки Fonts в Windows.")
+        end
+
+        sub_title("EXPAND", "Надписи на экране")
+        imgui.SetNextItemWidth(260)
+        if imgui.SliderFloat("Размер надписей на экране##overlay_scale", sui.scale, 0.7, 2.0, "%.1f") then
+            UI_CFG.overlay_scale = sui.scale[0]
+            mark_ui_dirty()
+        end
+        imgui.TextDisabled("Касается надписей PayDay и часов, которые показываются поверх игры.")
+        imgui.Spacing()
+        if imgui.Button(ic("ROTATE_LEFT", "") .. " Сбросить внешний вид##reset_look", imgui.ImVec2(230, 28)) then
+            UI_CFG.accent = { 0.18, 0.45, 0.85 }
+            UI_CFG.opacity = 1.0
+            UI_CFG.overlay_scale = 1.0
+            UI_CFG.border_mode = 1
+            UI_CFG.border_speed = 1.0
+            UI_CFG.shadow = true
+            if UI_CFG.font ~= "seguisb" then
+                UI_CFG.font = "seguisb"
+                sui.font_pending = true
+            end
+            sui.accent[0], sui.accent[1], sui.accent[2] = 0.18, 0.45, 0.85
+            sui.opacity[0] = 1.0
+            sui.scale[0] = 1.0
+            sui.border_speed[0] = 1.0
+            sui.shadow[0] = true
+            apply_theme()
+            mark_ui_dirty()
+        end
+
+        sub_title("KEYBOARD", "Управление")
+        imgui.AlignTextToFramePadding()
+        imgui.Text("Клавиша открытия меню:")
+        imgui.SameLine()
+        local bind_label = hk.binding and "Нажмите клавишу..." or key_name(UI_CFG.open_key)
+        if imgui.Button(bind_label .. "##bind_open_key", imgui.ImVec2(190, 26)) then
+            hk.binding = not hk.binding
+        end
+        imgui.TextDisabled("Esc - отмена, Backspace - убрать клавишу. Команда /prices работает всегда.")
+
+        sub_title("BELL", "Уведомления")
+        if imgui.Checkbox("Всплывающие карточки вместо сообщений в чате", sui.toasts) then
+            UI_CFG.toasts = sui.toasts[0]
+            mark_ui_dirty()
+        end
+        local corner_name = CORNERS[1].name
+        for _, c in ipairs(CORNERS) do
+            if c.v == UI_CFG.toast_corner then corner_name = c.name end
+        end
+        imgui.SetNextItemWidth(220)
+        if imgui.BeginCombo("Угол экрана##toast_corner", corner_name) then
+            for _, c in ipairs(CORNERS) do
+                if imgui.Selectable(c.name, c.v == UI_CFG.toast_corner) then
+                    UI_CFG.toast_corner = c.v
+                    mark_ui_dirty()
+                end
+            end
+            imgui.EndCombo()
+        end
+        if imgui.Button(ic("BELL", "") .. " Показать пример##toast_test", imgui.ImVec2(230, 28)) then
+            notify("Так выглядят уведомления", "ok")
+        end
+
+        sub_title("BUG", "Поддержка")
+        if imgui.Button(ic("BUG", "") .. " Сообщить об ошибке##report_error", imgui.ImVec2(230, 30)) then
+            send_bug_report()
+        end
+        imgui.TextDisabled("Скопирует версию скрипта и данные для диагностики и откроет Telegram разработчика.")
+        if #err_log > 0 then
+            imgui.TextColored(imgui.ImVec4(1.0, 0.55, 0.40, 1.0), "Записей в журнале ошибок: " .. #err_log)
+        end
+    end
+    imgui.EndChild()
 end
 
 local function draw_extra_tab(id)
@@ -1163,6 +1898,8 @@ local function draw_extra_tab(id)
         draw_about_tab()
     elseif id == 6 then
         draw_time_tab()
+    elseif id == 7 then
+        draw_settings_tab()
     end
 end
 
@@ -1172,7 +1909,7 @@ payday_frame = imgui.OnFrame(
         payday_frame.HideCursor = not payday_edit
         return payday_on[0]
     end,
-    function()
+    guard_frame("payday", function()
         if payday_edit and not main_window[0] then payday_edit = false end
         local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.AlwaysAutoResize, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
         if not payday_edit then
@@ -1181,23 +1918,39 @@ payday_frame = imgui.OnFrame(
         end
         imgui.SetNextWindowBgAlpha(0.45)
         imgui.Begin("##payday_overlay", nil, flags)
+        imgui.SetWindowFontScale(UI_CFG.overlay_scale)
         shadow_text(imgui.ImVec4(1.00, 0.85, 0.30, 1.00), payday_text())
         if payday_edit then
             local pos = imgui.GetWindowPos()
             payday_pos.x, payday_pos.y = pos.x, pos.y
         end
         imgui.End()
-    end
+    end, function() payday_on[0] = false end)
 )
 
-imgui.OnInitialize(function() 
-    fa.Init() 
-    apply_theme() 
-    load_data() 
+imgui.OnInitialize(function()
+    -- иконки в стандартный шрифт (его создаёт mimgui)
+    safe_call("fa_init", function() fa.Init() end)
+    -- свой шрифт: добавляем с кириллицей, дублируем в него иконки и делаем основным
+    safe_call("custom_font", function()
+        local pick
+        for _, f in ipairs(FONT_AVAILABLE) do
+            if f.key == UI_CFG.font and f.path then pick = f end
+        end
+        if not pick then return end
+        local io_ = imgui.GetIO()
+        local font = io_.Fonts:AddFontFromFileTTF(pick.path, 14, nil, io_.Fonts:GetGlyphRangesCyrillic())
+        if font ~= nil then
+            fa.Init()
+            io_.FontDefault = font
+        end
+    end)
+    safe_call("apply_theme", apply_theme)
+    safe_call("load_data", load_data)
 end)
 
 imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
-    function(player)
+    guard_frame("menu", function(player)
         if main_window[0] then 
             local sw, sh = getScreenResolution()
             imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5)) 
@@ -1205,17 +1958,18 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
             if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
                 local wpos = imgui.GetWindowPos()
                 local win_cx, win_cy = wpos.x + (SIDEBAR_W + 635) / 2, wpos.y + 500 / 2
+                hk.typing = imgui.GetIO().WantTextInput
 
                 -- Левая панель с вкладками
-                imgui.GetWindowDrawList():AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(0.10, 0.10, 0.115, 1.00)))
-                imgui.GetWindowDrawList():AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 500), imgui.GetColorU32(imgui.Col.Separator), 1.0)
+                draw_sidebar_bg(wpos)
                 imgui.SetCursorPos(imgui.ImVec2(5, 5))
-                sidebar_tab(fa.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1)
+                sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1)
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2)
                 sidebar_tab(ic("CLOCK", "") .. " Отчет до PayDay", 3)
                 sidebar_tab(ic("COMMENT_DOTS", "") .. " Фразы", 4)
                 sidebar_tab(ic("GLOBE", "") .. " Время стран", 6)
                 sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5)
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7)
                 draw_update_block()
 
                 -- Правая часть (содержимое выбранной вкладки)
@@ -1226,10 +1980,10 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 if current_tab == 1 then
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
-                imgui.Text(fa.CIRCLE_DOLLAR .. u8(' Arizona Prices'))
+                imgui.Text(FA.CIRCLE_DOLLAR .. u8(' Arizona Prices'))
                 imgui.SameLine(140) 
                 imgui.SetNextItemWidth(306) 
-                imgui.InputTextWithHint("##search", fa.MAGNIFYING_GLASS .. " Поиск", buf_search, ffi.sizeof(buf_search))
+                imgui.InputTextWithHint("##search", FA.MAGNIFYING_GLASS .. " Поиск", buf_search, ffi.sizeof(buf_search))
                 imgui.SameLine() 
                 imgui.SetNextItemWidth(150)
                 
@@ -1250,7 +2004,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 
                 imgui.SameLine(606) 
                 imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0)) 
-                if imgui.Button(fa.CIRCLE_XMARK .. "##close", imgui.ImVec2(24, 24)) then 
+                if imgui.Button(FA.CIRCLE_XMARK .. "##close", imgui.ImVec2(24, 24)) then 
                     main_window[0] = false 
                 end 
                 imgui.PopStyleColor(1) 
@@ -1261,7 +2015,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     local table_start_x = imgui.GetCursorScreenPos().x
                     local table_top_y = imgui.GetCursorScreenPos().y - table_style.WindowPadding.y 
                     local separator_spacing = table_style.ItemSpacing.y 
-                    local col_w0, col_w1, col_w2, col_w3 = 295, 120, 120, 80
+                    local col_w0, col_w1, col_w2, col_w3 = 275, 140, 120, 80
                     
                     imgui.Columns(4, "item_table", false) 
                     imgui.SetColumnWidth(0, col_w0) 
@@ -1272,28 +2026,28 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     do 
                         local sz = imgui.CalcTextSize("Предмет")
                         imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w0 - sz.x) * 0.5)) 
-                        imgui.Text("Предмет")
+                        imgui.TextColored(accent_vec(1.3), "Предмет")
                     end 
                     imgui.NextColumn()
 
                     do 
-                        local sz = imgui.CalcTextSize("Цена")
+                        local sz = imgui.CalcTextSize("Скупочная цена")
                         imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w1 - sz.x) * 0.5)) 
-                        imgui.Text("Цена")
+                        imgui.TextColored(accent_vec(1.3), "Скупочная цена")
                     end 
                     imgui.NextColumn()
 
                     do 
                         local sz = imgui.CalcTextSize("Продажа")
                         imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w2 - sz.x) * 0.5)) 
-                        imgui.Text("Продажа")
+                        imgui.TextColored(accent_vec(1.3), "Продажа")
                     end 
                     imgui.NextColumn()
 
                     do 
                         local sz = imgui.CalcTextSize("Действия")
                         imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - sz.x) * 0.5)) 
-                        imgui.Text("Действия")
+                        imgui.TextColored(accent_vec(1.3), "Действия")
                     end 
                     imgui.NextColumn() 
                     imgui.Separator()
@@ -1317,14 +2071,24 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         table.sort(display_indices, function(a, b) local name_a = (items_list[a].item or ""):lower() local name_b = (items_list[b].item or ""):lower() return name_a < name_b end)
                     end
 
-                    for _, idx in ipairs(display_indices) do 
+                    for ri, idx in ipairs(display_indices) do 
                         local item = items_list[idx]
                         if item then 
                             local row_y = imgui.GetCursorPosY() 
+                            do
+                                local rp = imgui.GetCursorScreenPos()
+                                local rx1 = table_start_x + col_w0 + col_w1 + col_w2 + col_w3
+                                local r0, r1 = imgui.ImVec2(table_start_x, rp.y - 2), imgui.ImVec2(rx1, rp.y + 27)
+                                if imgui.IsMouseHoveringRect(r0, r1) then
+                                    imgui.GetWindowDrawList():AddRectFilled(r0, r1, col32(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 0.14), 6)
+                                elseif ri % 2 == 0 then
+                                    imgui.GetWindowDrawList():AddRectFilled(r0, r1, col32(1, 1, 1, 0.025), 6)
+                                end
+                            end
                             local item_text = item.item or "" 
                             local sz = imgui.CalcTextSize(item_text)
                             imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
-                            local icon_w = imgui.CalcTextSize(fa.CIRCLE_QUESTION).x 
+                            local icon_w = imgui.CalcTextSize(FA.CIRCLE_QUESTION).x 
                             local max_w = col_w0 - icon_w - 12
 
                             if sz.x > max_w then 
@@ -1341,7 +2105,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 imgui.Text(truncated) 
                                 if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end 
                                 imgui.SameLine(col_w0 - icon_w - 6) 
-                                imgui.Text(fa.CIRCLE_QUESTION) 
+                                imgui.Text(FA.CIRCLE_QUESTION) 
                                 if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end
                             else 
                                 imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w0 - sz.x) * 0.5)) 
@@ -1353,7 +2117,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 local sz = imgui.CalcTextSize(format_price(item.buy))
                                 imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
                                 imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w1 - sz.x) * 0.5)) 
-                                imgui.Text(format_price(item.buy))
+                                imgui.TextColored(imgui.ImVec4(0.55, 0.92, 0.65, 1.0), format_price(item.buy))
                             end
 
                             imgui.NextColumn()
@@ -1363,10 +2127,10 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 local sz = imgui.CalcTextSize(sale_text)
                                 imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
                                 imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w2 - sz.x - 20) * 0.5)) 
-                                imgui.Text(sale_text)
-                                local icon_w = imgui.CalcTextSize(fa.BADGE_PERCENT).x 
+                                imgui.TextColored(imgui.ImVec4(1.0, 0.85, 0.45, 1.0), sale_text)
+                                local icon_w = imgui.CalcTextSize(FA.BADGE_PERCENT).x 
                                 imgui.SameLine(col_w2 - icon_w - 6) 
-                                imgui.Text(fa.BADGE_PERCENT)
+                                imgui.Text(FA.BADGE_PERCENT)
                                 if imgui.IsItemHovered() then 
                                     imgui.SetTooltip("1%% - " .. format_price(math.floor(sale_value * 0.99 + 0.5)) .. "\n" .. "3%% - " .. format_price(math.floor(sale_value * 0.97 + 0.5)) .. "\n" .. "4%% - " .. format_price(math.floor(sale_value * 0.96 + 0.5)) .. "\n" .. "5%% - " .. format_price(math.floor(sale_value * 0.95 + 0.5))) 
                                 end
@@ -1377,12 +2141,12 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                             imgui.SetCursorPosY(row_y) 
                             imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - buttons_total_width) * 0.5))
                             
-                            if imgui.Button(fa.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
+                            if imgui.Button(FA.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
                                 open_edit_modal(idx) 
                             end 
                             imgui.SameLine()
                             
-                            if imgui.Button(fa.TRASH_CAN .. "##del_" .. idx, imgui.ImVec2(28, 24)) then 
+                            if imgui.Button(FA.TRASH_CAN .. "##del_" .. idx, imgui.ImVec2(28, 24)) then 
                                 pending_delete_index = idx 
                                 pending_delete_open = true 
                             end
@@ -1408,21 +2172,21 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
 
                 local add_w = imgui.GetContentRegionAvail().x - 70
-                if imgui.Button(fa.CIRCLE_PLUS .. " Добавить предмет", imgui.ImVec2(add_w, 30)) then
+                if imgui.Button(FA.CIRCLE_PLUS .. " Добавить предмет", imgui.ImVec2(add_w, 30)) then
                     open_add_modal() 
                 end
 
                 imgui.SameLine()
-                if imgui.Button(fa.TRIANGLE_EXCLAMATION .. "##report_prices", imgui.ImVec2(30, 30)) then
+                if imgui.Button(FA.TRIANGLE_EXCLAMATION .. "##report_prices", imgui.ImVec2(30, 30)) then
                     open_url("https://t.me/xi_vivide")
                 end
                 if imgui.IsItemHovered() then imgui.SetTooltip("Сообщить об устаревших ценах") end
 
                 imgui.SameLine()
-                if imgui.Button(fa.BUG .. "##report_bug", imgui.ImVec2(30, 30)) then
-                    open_url("https://t.me/obrezik")
+                if imgui.Button(FA.BUG .. "##report_bug", imgui.ImVec2(30, 30)) then
+                    send_bug_report()
                 end
-                if imgui.IsItemHovered() then imgui.SetTooltip("Сообщить о баге") end
+                if imgui.IsItemHovered() then imgui.SetTooltip("Сообщить о баге (скопирует данные для разработчика)") end
 
                 if pending_modal_open then 
                     imgui.OpenPopup(is_editing and MODAL_ID_EDIT or MODAL_ID_ADD) 
@@ -1434,9 +2198,9 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     imgui.SetNextWindowPos(imgui.ImVec2(win_cx, win_cy), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5)) 
                     imgui.SetNextWindowSize(imgui.ImVec2(300, 171), imgui.Cond.Always)
                     if imgui.BeginPopupModal(popup_title, modal_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize)) then
-                        local hint_item = fa.LAYER_GROUP .. " Предмет"
-                        local hint_buy = fa.HANDS_HOLDING_DOLLAR .. " Цена"
-                        local hint_sell = fa.HAND_HOLDING_DOLLAR .. " Продажа"
+                        local hint_item = FA.LAYER_GROUP .. " Предмет"
+                        local hint_buy = FA.HANDS_HOLDING_DOLLAR .. " Скупочная цена"
+                        local hint_sell = FA.HAND_HOLDING_DOLLAR .. " Продажа"
                         
                         if is_blinking then 
                             local elapsed = os.clock() - blink_start_time
@@ -1465,7 +2229,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         end
 
                         if is_editing then
-                            if imgui.Button(fa.FLOPPY_DISK .. " Сохранить", imgui.ImVec2(142, 30)) then
+                            if imgui.Button(FA.FLOPPY_DISK .. " Сохранить", imgui.ImVec2(142, 30)) then
                                 local name_str = ffi.string(buf_item) 
                                 local buy_str = ffi.string(buf_buy) 
                                 local sell_str = ffi.string(buf_sell)
@@ -1488,11 +2252,11 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 end
                             end
                             imgui.SameLine()
-                            if imgui.Button(fa.CIRCLE_XMARK .. " Отменить", imgui.ImVec2(142, 30)) then
+                            if imgui.Button(FA.CIRCLE_XMARK .. " Отменить", imgui.ImVec2(142, 30)) then
                                 close_modal() 
                             end
                         else
-                            if imgui.Button(fa.CIRCLE_PLUS .. " Добавить", imgui.ImVec2(-1, 30)) then
+                            if imgui.Button(FA.CIRCLE_PLUS .. " Добавить", imgui.ImVec2(-1, 30)) then
                                 local name_str = ffi.string(buf_item) 
                                 local buy_str = ffi.string(buf_buy) 
                                 local sell_str = ffi.string(buf_sell)
@@ -1520,16 +2284,16 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
 
                 if pending_delete_open then 
-                    imgui.OpenPopup(fa.TRASH_CAN .. ' Подтверждение удаления##delete_modal')
+                    imgui.OpenPopup(FA.TRASH_CAN .. ' Подтверждение удаления##delete_modal')
                     pending_delete_open = false 
                 end
 
                 imgui.SetNextWindowPos(imgui.ImVec2(win_cx, win_cy), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5)) 
                 imgui.SetNextWindowSize(imgui.ImVec2(415, 88), imgui.Cond.Always)
-                if imgui.BeginPopupModal(fa.TRASH_CAN .. ' Подтверждение удаления##delete_modal', nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize)) then
-                    imgui.TextWrapped(fa.CIRCLE_QUESTION .. ' Вы действительно хотите удалить этот предмет из справочника?')
+                if imgui.BeginPopupModal(FA.TRASH_CAN .. ' Подтверждение удаления##delete_modal', nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize)) then
+                    imgui.TextWrapped(FA.CIRCLE_QUESTION .. ' Вы действительно хотите удалить этот предмет из справочника?')
                     imgui.Spacing()
-                    if imgui.Button(fa.TRASH_CAN .. ' Да, удалить', imgui.ImVec2(200, 30)) then
+                    if imgui.Button(FA.TRASH_CAN .. ' Да, удалить', imgui.ImVec2(200, 30)) then
                         if pending_delete_index and items_list[pending_delete_index] then 
                             table.remove(items_list, pending_delete_index) 
                             save_data() 
@@ -1538,7 +2302,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         imgui.CloseCurrentPopup()
                     end
                     imgui.SameLine()
-                    if imgui.Button(fa.CIRCLE_XMARK .. ' Отменить', imgui.ImVec2(200, 30)) then
+                    if imgui.Button(FA.CIRCLE_XMARK .. ' Отменить', imgui.ImVec2(200, 30)) then
                         pending_delete_index = nil 
                         imgui.CloseCurrentPopup() 
                     end
@@ -1553,21 +2317,17 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
                 imgui.EndChild()
 
+                draw_window_fx(wpos.x, wpos.y, wpos.x + SIDEBAR_W + 635, wpos.y + 500)
+                imgui.End()
+            else
                 imgui.End()
             end
         end
-    end
+    end, function() main_window[0] = false; modal_window[0] = false; hk.binding = false end)
 )
 
 -- ===================== Большое окно «старая версия» =====================
-imgui.OnFrame(function()
-    local open = main_window[0]
-    if open and not prev_main_open and update_info.available then
-        outdated_popup[0] = true
-    end
-    prev_main_open = open
-    return outdated_popup[0]
-end, function()
+imgui.OnFrame(function() return outdated_popup[0] end, guard_frame("outdated", function()
     local sw, sh = getScreenResolution()
     imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
     imgui.SetNextWindowSize(imgui.ImVec2(580, 290), imgui.Cond.Always)
@@ -1586,7 +2346,7 @@ end, function()
     imgui.SetCursorPos(imgui.ImVec2(24, 90))
     imgui.SetWindowFontScale(1.3)
     imgui.PushTextWrapPos(556)
-    imgui.TextWrapped("Внимание, у вас старая версия скрипта, обновите для комфортного использования.")
+    imgui.TextWrapped("У вас старая версия скрипта. Обновите для комфортного использования.")
     imgui.PopTextWrapPos()
     imgui.SetWindowFontScale(1.0)
 
@@ -1599,32 +2359,33 @@ end, function()
 
     imgui.SetCursorPos(imgui.ImVec2(24, 290 - 24 - 44))
     local half = (580 - 48 - 10) / 2
-    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.18, 0.45, 0.85, 1.00))
-    imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(0.22, 0.52, 0.92, 1.00))
-    imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(0.15, 0.38, 0.75, 1.00))
+    imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.15))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(0.85))
     if update_info.busy then
         imgui.Button("Скачивание...##outdated_busy", imgui.ImVec2(half, 44))
     elseif imgui.Button(ic("DOWNLOAD", "") .. " Обновить##outdated_update", imgui.ImVec2(half, 44)) then
-        start_update()
+        request_update()
     end
     imgui.PopStyleColor(3)
     imgui.SameLine()
-    if imgui.Button(fa.CIRCLE_XMARK .. " Закрыть##outdated_close", imgui.ImVec2(half, 44)) then
+    if imgui.Button(FA.CIRCLE_XMARK .. " Закрыть##outdated_close", imgui.ImVec2(half, 44)) then
         outdated_popup[0] = false
     end
     imgui.End()
-end)
+end, function() outdated_popup[0] = false end))
 
-function main() 
-    while not isSampAvailable() do wait(0) end 
-    load_data() 
-    
+function main()
+    while not isSampAvailable() do wait(0) end
+    safe_call("load_data", load_data)
+
     sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices V2.0] {FFFFFF}Скрипт успешно загружен! Для активации - {33AAFF}/prices{FFFFFF}. ТГК - {33AAFF}@arizona_prices"), -1)
-    
-    sampRegisterChatCommand('prices', function()
-        main_window[0] = not main_window[0]
+
+    sampRegisterChatCommand('prices', toggle_menu)
+    addEventHandler('onWindowMessage', function(msg, wparam, lparam)
+        safe_call("hotkey", on_window_message, msg, wparam, lparam)
     end)
-    
+
     local next_check = os.time() + 5
     while true do
         wait(100)
@@ -1633,15 +2394,30 @@ function main()
             pending_url = nil
             pcall(function() shell32.ShellExecuteA(nil, "open", url, nil, nil, 1) end)
         end
-        process_updates()
+        while #ui_actions > 0 do
+            safe_call("action", table.remove(ui_actions, 1))
+        end
+        if not main_window[0] and hk.binding then hk.binding = false end
+        safe_call("updates", process_updates)
+        if #pending_notices > 0 then
+            local n = table.remove(pending_notices, 1)
+            safe_call("notice", notify, n.text, n.kind)
+        end
+        safe_call("save_ui", flush_ui_save)
         if os.time() >= next_check then
             next_check = os.time() + CHECK_EVERY
-            pcall(start_checks)
+            safe_call("start_checks", start_checks)
         end
         if need_reload then
             need_reload = false
             wait(700)
             thisScript():reload()
         end
+    end
+end
+
+function onScriptTerminate(scr, quit)
+    if scr == thisScript() then
+        pcall(flush_ui_save, true)
     end
 end
