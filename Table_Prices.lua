@@ -181,13 +181,53 @@ local function safe_read_json(path)
     return nil
 end
 
+-- ===================== Режим разработчика (правка цен и ликвидности только у владельца) =====================
+-- Остальные игроки видят цены только на чтение: их список всегда приводится к списку из нашего канала.
+local ADM = {
+    on = false,
+    HASH = 888940931,
+    LIQ = { ["Ликвид"] = true, ["Средне"] = true, ["Неликвид"] = true },
+    path = getWorkingDirectory() .. "\\config\\arizona_prices_admin.json",
+}
+
+function ADM.hash(code)
+    local s = "arzp|" .. tostring(code):lower()
+    local h = 5381
+    for i = 1, #s do h = (h * 33 + s:byte(i)) % 4294967296 end
+    return h
+end
+
+function ADM.valid_liq(v)
+    if type(v) == "string" and ADM.LIQ[v] then return v end
+    return nil
+end
+
+function ADM.enable(code)
+    if ADM.hash(code) ~= ADM.HASH then return false end
+    ADM.on = true
+    local dir = getWorkingDirectory() .. "\\config"
+    if not doesDirectoryExist(dir) then createDirectory(dir) end
+    write_file_raw(ADM.path, encodeJson({ hash = ADM.HASH }))
+    return true
+end
+
+function ADM.disable()
+    ADM.on = false
+    os.remove(ADM.path)
+end
+
+do
+    local d = safe_read_json(ADM.path)
+    if type(d) == "table" and tonumber(d.hash) == ADM.HASH then ADM.on = true end
+end
+
 local function load_data()
     local data = safe_read_json(datadir)
     if data then
         local clean = {}
         for _, v in ipairs(data) do
             if type(v) == "table" then
-                clean[#clean + 1] = { item = tostring(v.item or ""), buy = tonumber(v.buy) or 0, sell = tonumber(v.sell) or 0 }
+                clean[#clean + 1] = { item = tostring(v.item or ""), buy = tonumber(v.buy) or 0, sell = tonumber(v.sell) or 0, liq = ADM.valid_liq(v.liq) }
             end
         end
         items_list = clean
@@ -835,6 +875,21 @@ end
 
 -- ===================== Эффекты интерфейса =====================
 -- Устанавливает прозрачность всего, что рисуется дальше (и стандартных виджетов, и ручного рисования)
+-- цвет и следующее значение ликвидности (клик по значению у разработчика переключает по кругу)
+function UIFX.liq_color(l)
+    if l == "Ликвид" then return imgui.ImVec4(0.45, 0.95, 0.55, 1) end
+    if l == "Средне" then return imgui.ImVec4(1.00, 0.85, 0.40, 1) end
+    if l == "Неликвид" then return imgui.ImVec4(1.00, 0.45, 0.45, 1) end
+    return imgui.ImVec4(0.50, 0.52, 0.58, 1)
+end
+
+function UIFX.liq_next(l)
+    if l == nil then return "Ликвид" end
+    if l == "Ликвид" then return "Средне" end
+    if l == "Средне" then return "Неликвид" end
+    return nil
+end
+
 function UIFX.set_alpha(a)
     a = clamp(a, 0, 1)
     UIFX.m = a
@@ -1646,7 +1701,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.9"
+local SCRIPT_VERSION = "3.0"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1786,9 +1841,35 @@ local function handle_prices()
     os.remove(path)
     if not c or #c < 2 then return end
     local sig = signature(c)
-    if sig == state.prices_sig then return end
     local ok, remote = pcall(decodeJson, c)
     if not ok or type(remote) ~= "table" then return end
+
+    -- обычный игрок: список всегда ТОЧНО равен списку из канала (так нельзя подкрутить цены у себя и обмануть другого)
+    if not ADM.on then
+        local fresh = {}
+        for _, r in ipairs(remote) do
+            local buy = type(r) == "table" and tonumber(r.buy) or nil
+            local sell = type(r) == "table" and tonumber(r.sell) or nil
+            if buy and sell and type(r.item) == "string" then
+                fresh[#fresh + 1] = { item = r.item, buy = buy, sell = sell, liq = ADM.valid_liq(r.liq) }
+            end
+        end
+        if #fresh == 0 then return end
+        local same = false
+        local okc, a1, a2 = pcall(function() return encodeJson(fresh), encodeJson(items_list) end)
+        if okc and a1 == a2 then same = true end
+        if not same then
+            items_list = fresh
+            save_data()
+            if sig ~= state.prices_sig then notify("Цены обновлены из канала", "ok", 5) end
+        end
+        state.prices_sig = sig
+        save_state()
+        return
+    end
+
+    -- разработчик: свои правки не затираем, только подтягиваем новые предметы и цены
+    if sig == state.prices_sig then return end
     local index = {}
     for i, it in ipairs(items_list) do
         if it.item then index[it.item] = i end
@@ -1806,7 +1887,7 @@ local function handle_prices()
                     changed = changed + 1
                 end
             else
-                items_list[#items_list + 1] = { item = r.item, buy = buy, sell = sell }
+                items_list[#items_list + 1] = { item = r.item, buy = buy, sell = sell, liq = ADM.valid_liq(r.liq) }
                 index[r.item] = #items_list
                 added = added + 1
             end
@@ -2643,13 +2724,16 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                     local table_start_x = imgui.GetCursorScreenPos().x
                     local table_top_y = imgui.GetCursorScreenPos().y - table_style.WindowPadding.y 
                     local separator_spacing = table_style.ItemSpacing.y 
-                    local col_w0, col_w1, col_w2, col_w3 = math.max(110, math.floor(imgui.GetContentRegionAvail().x) - 368), 140, 120, 108
+                    local col_wl = 110
+                    local col_w1, col_w2, col_w3 = 140, 120, ADM.on and 108 or 44
+                    local col_w0 = math.max(110, math.floor(imgui.GetContentRegionAvail().x) - (col_wl + col_w1 + col_w2 + col_w3))
                     
-                    imgui.Columns(4, "item_table", false) 
+                    imgui.Columns(5, "item_table", false) 
                     imgui.SetColumnWidth(0, col_w0) 
-                    imgui.SetColumnWidth(1, col_w1) 
-                    imgui.SetColumnWidth(2, col_w2) 
-                    imgui.SetColumnWidth(3, col_w3)
+                    imgui.SetColumnWidth(1, col_wl) 
+                    imgui.SetColumnWidth(2, col_w1) 
+                    imgui.SetColumnWidth(3, col_w2) 
+                    imgui.SetColumnWidth(4, col_w3)
 
                     do 
                         local sz = imgui.CalcTextSize("Предмет")
@@ -2658,6 +2742,12 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                     end 
                     imgui.NextColumn()
 
+                    do
+                        local sz = imgui.CalcTextSize("Ликвидность")
+                        imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_wl - sz.x) * 0.5))
+                        imgui.TextColored(accent_vec(1.3), "Ликвидность")
+                    end
+                    imgui.NextColumn()
                     do 
                         local sz = imgui.CalcTextSize("Скупочная цена")
                         imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w1 - sz.x) * 0.5)) 
@@ -2721,7 +2811,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             UIFX.set_alpha(UIFX.base * ra)
                             do
                                 local rp = imgui.GetCursorScreenPos()
-                                local rx1 = table_start_x + col_w0 + col_w1 + col_w2 + col_w3
+                                local rx1 = table_start_x + col_w0 + col_wl + col_w1 + col_w2 + col_w3
                                 local r0, r1 = imgui.ImVec2(table_start_x, rp.y - 2), imgui.ImVec2(rx1, rp.y + 27)
                                 local row_hover = imgui.IsMouseHoveringRect(r0, r1)
                                 if row_hover and imgui.IsWindowHovered() and imgui.IsMouseClicked(1) then
@@ -2767,6 +2857,27 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             end
 
                             imgui.NextColumn()
+                            do
+                                local liq = item.liq
+                                local txt = liq or "-"
+                                local lc = UIFX.liq_color(liq)
+                                if ADM.on then
+                                    -- режим разработчика: клик по значению переключает ликвидность
+                                    imgui.SetCursorPosY(row_y)
+                                    imgui.PushStyleColor(imgui.Col.Text, lc)
+                                    if imgui.Button(txt .. "##liq_" .. idx, imgui.ImVec2(col_wl - 14, 24)) then
+                                        item.liq = UIFX.liq_next(liq)
+                                        save_data()
+                                    end
+                                    imgui.PopStyleColor(1)
+                                else
+                                    local sz = imgui.CalcTextSize(txt)
+                                    imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5))
+                                    imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_wl - sz.x) * 0.5))
+                                    imgui.TextColored(lc, txt)
+                                end
+                            end
+                            imgui.NextColumn()
                             do 
                                 local sz = imgui.CalcTextSize(format_price(item.buy))
                                 imgui.SetCursorPosY(row_y + math.max(0, (24 - sz.y) * 0.5)) 
@@ -2791,7 +2902,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             end
 
                             imgui.NextColumn()
-                            local buttons_total_width = 28 * 3 + 10
+                            local buttons_total_width = ADM.on and (28 * 3 + 10) or 28
                             imgui.SetCursorPosY(row_y) 
                             imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - buttons_total_width) * 0.5))
                             
@@ -2802,6 +2913,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             end
                             imgui.PopStyleColor(1)
                             if imgui.IsItemHovered() then imgui.SetTooltip(is_fav and "Убрать из избранного" or "В избранное") end
+                            if ADM.on then
                             imgui.SameLine()
                             if imgui.Button(FA.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
                                 open_edit_modal(idx) 
@@ -2811,6 +2923,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             if imgui.Button(FA.TRASH_CAN .. "##del_" .. idx, imgui.ImVec2(28, 24)) then 
                                 pending_delete_index = idx 
                                 pending_delete_open = true 
+                            end
                             end
 
                             imgui.NextColumn() 
@@ -2857,8 +2970,8 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                         local draw_list = imgui.GetWindowDrawList() 
                         local border_col = imgui.GetColorU32(imgui.Col.Separator) 
                         local x = table_start_x 
-                        local column_widths = {col_w0, col_w1, col_w2}
-                        for i = 1, 3 do 
+                        local column_widths = {col_w0, col_wl, col_w1, col_w2}
+                        for i = 1, 4 do 
                             x = x + column_widths[i] 
                             draw_list:AddLine(imgui.ImVec2(x, table_top_y), imgui.ImVec2(x, table_bottom_y), border_col, 1.0) 
                         end
@@ -2867,8 +2980,14 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 end
 
                 local add_w = imgui.GetContentRegionAvail().x - 95
-                if imgui.Button(FA.CIRCLE_PLUS .. " Добавить предмет", imgui.ImVec2(add_w, 30)) then
-                    open_add_modal() 
+                if ADM.on then
+                    if imgui.Button(FA.CIRCLE_PLUS .. " Добавить предмет", imgui.ImVec2(add_w, 30)) then
+                        open_add_modal()
+                    end
+                else
+                    if imgui.Button(ic("PAPER_PLANE", "") .. " Актуальные цены - в нашем ТГК @arizona_prices##open_tg", imgui.ImVec2(add_w, 30)) then
+                        open_url("https://t.me/arizona_prices")
+                    end
                 end
 
                 imgui.SameLine()
@@ -2946,7 +3065,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                                     local buy = tonumber(buy_str) 
                                     local sell = tonumber(sell_str)
                                     if buy and sell and edit_index and items_list[edit_index] then 
-                                        items_list[edit_index] = {item = name, buy = buy, sell = sell} 
+                                        items_list[edit_index] = {item = name, buy = buy, sell = sell, liq = items_list[edit_index].liq} 
                                         save_data() 
                                         close_modal() 
                                     end
@@ -3090,6 +3209,17 @@ function main()
     sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices V2.0] {FFFFFF}Скрипт успешно загружен! Для активации - {33AAFF}/prices{FFFFFF}. ТГК - {33AAFF}@arizona_prices"), -1)
 
     sampRegisterChatCommand('prices', toggle_menu)
+    sampRegisterChatCommand('pradmin', function(arg)
+        arg = tostring(arg or ""):gsub("%s", "")
+        if arg == "off" then
+            ADM.disable()
+            sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Режим разработчика выключен"), -1)
+        elseif arg ~= "" and ADM.enable(arg) then
+            sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {55FF55}Режим разработчика включён{FFFFFF}. Правка цен и ликвидности открыта"), -1)
+        else
+            sampAddChatMessage(u8:decode("{33AAFF}[Arizona Prices] {FF5555}Неверный код"), -1)
+        end
+    end)
     addEventHandler('onWindowMessage', function(msg, wparam, lparam)
         safe_call("hotkey", on_window_message, msg, wparam, lparam)
     end)
