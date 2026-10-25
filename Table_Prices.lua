@@ -49,6 +49,7 @@ local edit_index = nil
 local pending_modal_open = false 
 local pending_delete_open = false 
 local pending_delete_index = nil
+local selected_item_name = nil -- строка таблицы, на которую нажали (для «Сообщить об устаревших ценах»)
 local is_blinking = false 
 local blink_start_time = 0
 
@@ -1020,6 +1021,7 @@ local function draw_calculator()
     if imgui.Button(FA.CIRCLE_XMARK .. "##close_calc", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
+    if imgui.IsItemHovered() then imgui.SetTooltip("Закрыть") end
     imgui.PopStyleColor(1)
     imgui.Spacing()
 
@@ -1154,6 +1156,7 @@ local function section_header(icon, title)
     if imgui.Button(FA.CIRCLE_XMARK .. "##close_section", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
+    if imgui.IsItemHovered() then imgui.SetTooltip("Закрыть") end
     imgui.PopStyleColor(1)
     imgui.Spacing()
 end
@@ -1529,7 +1532,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.4"
+local SCRIPT_VERSION = "2.5"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2012,9 +2015,10 @@ end
 
 local function send_bug_report()
     local ok, text = pcall(build_report)
-    imgui.SetClipboardText(ok and text or ("Arizona Prices " .. SCRIPT_VERSION))
-    open_url("https://t.me/obrezik")
-    notify("Данные для разработчика скопированы - вставьте их в сообщение (Ctrl+V)", "ok", 6)
+    local body = ok and text or ("Arizona Prices " .. SCRIPT_VERSION)
+    imgui.SetClipboardText("Привет. Заметил о баге:\n\n\n" .. body)
+    open_url("https://t.me/xi_vivide")
+    notify("Сообщение скопировано - допишите, что случилось, и отправьте (Ctrl+V)", "ok", 6)
 end
 
 local THEMES = {
@@ -2360,7 +2364,14 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 if current_tab == 1 then
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
+                local hdr_pos = imgui.GetCursorScreenPos()
                 imgui.Text(FA.CIRCLE_DOLLAR .. u8(' Arizona Prices'))
+                if imgui.IsItemHovered() then
+                    local r0, r1 = imgui.GetItemRectMin(), imgui.GetItemRectMax()
+                    imgui.GetWindowDrawList():AddLine(imgui.ImVec2(r0.x, r1.y), imgui.ImVec2(r1.x, r1.y), col32(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 1), 1.5)
+                    imgui.SetTooltip("Открыть наш Telegram-канал @arizona_prices")
+                    if imgui.IsMouseClicked(0) then open_url("https://t.me/arizona_prices") end
+                end
                 imgui.SameLine(140) 
                 imgui.SetNextItemWidth(math.max(90, LAYOUT.w - SIDEBAR_W - 329)) 
                 imgui.InputTextWithHint("##search", FA.MAGNIFYING_GLASS .. " Поиск", buf_search, ffi.sizeof(buf_search))
@@ -2387,6 +2398,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 if imgui.Button(FA.CIRCLE_XMARK .. "##close", imgui.ImVec2(24, 24)) then 
                     main_window[0] = false 
                 end 
+                if imgui.IsItemHovered() then imgui.SetTooltip("Закрыть") end
                 imgui.PopStyleColor(1) 
                 imgui.Spacing()
 
@@ -2459,7 +2471,13 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                                 local rp = imgui.GetCursorScreenPos()
                                 local rx1 = table_start_x + col_w0 + col_w1 + col_w2 + col_w3
                                 local r0, r1 = imgui.ImVec2(table_start_x, rp.y - 2), imgui.ImVec2(rx1, rp.y + 27)
-                                if imgui.IsMouseHoveringRect(r0, r1) then
+                                local row_hover = imgui.IsMouseHoveringRect(r0, r1)
+                                if row_hover and imgui.IsWindowHovered() and imgui.IsMouseClicked(0) then
+                                    selected_item_name = item.item
+                                end
+                                if selected_item_name ~= nil and item.item == selected_item_name then
+                                    imgui.GetWindowDrawList():AddRectFilled(r0, r1, col32(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 0.30), 6)
+                                elseif row_hover then
                                     imgui.GetWindowDrawList():AddRectFilled(r0, r1, col32(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 0.14), 6)
                                 elseif ri % 2 == 0 then
                                     imgui.GetWindowDrawList():AddRectFilled(r0, r1, col32(1, 1, 1, 0.025), 6)
@@ -2558,9 +2576,15 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
 
                 imgui.SameLine()
                 if imgui.Button(FA.TRIANGLE_EXCLAMATION .. "##report_prices", imgui.ImVec2(30, 30)) then
-                    open_url("https://t.me/xi_vivide")
+                    if selected_item_name and selected_item_name ~= "" then
+                        imgui.SetClipboardText("Привет. Заметил что цена предмета \"" .. selected_item_name .. "\" изменилась, прошу обновить")
+                        open_url("https://t.me/xi_vivide")
+                        notify("Сообщение скопировано - вставьте его в чат (Ctrl+V)", "ok", 6)
+                    else
+                        notify("Сначала нажмите на предмет в таблице, цена которого устарела", "warn", 5)
+                    end
                 end
-                if imgui.IsItemHovered() then imgui.SetTooltip("Сообщить об устаревших ценах") end
+                if imgui.IsItemHovered() then imgui.SetTooltip("Сообщить об устаревших ценах\n(сначала нажмите на предмет в таблице)") end
 
                 imgui.SameLine()
                 if imgui.Button(FA.BUG .. "##report_bug", imgui.ImVec2(30, 30)) then
