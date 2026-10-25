@@ -1529,7 +1529,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.3"
+local SCRIPT_VERSION = "2.4"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1824,7 +1824,19 @@ function AUTH.try_login()
     local code = ffi.string(AUTH.code):gsub("%s", "")
     if nick == "" then AUTH.error = "Введите ваш никнейм"; return end
     if code == "" then AUTH.error = "Введите код из телеграм-канала"; return end
-    if code:lower() ~= AUTH.ACCESS_CODE:lower() then AUTH.error = "Неверный код. Получите актуальный код в телеграм-канале"; return end
+    if AUTH.loading then return end
+    AUTH.error = ""
+    AUTH.loading = { t = imgui.GetTime(), nick = nick, code = code }
+end
+
+-- фаза 2 (через 3 секунды): проверяем код и открываем меню
+function AUTH.finish()
+    local nick, code = AUTH.loading.nick, AUTH.loading.code
+    AUTH.loading = nil
+    if code:lower() ~= AUTH.ACCESS_CODE:lower() then
+        AUTH.error = "Неверный код. Получите актуальный код в телеграм-канале"
+        return
+    end
     AUTH.ok = true
     AUTH.error = ""
     AUTH.open[0] = false
@@ -1855,6 +1867,40 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
     imgui.PushTextWrapPos(W - 26)
     imgui.TextWrapped("Вы попали в окно авторизации. Введите свой никнейм и код. Код можно получить в телеграм-канале.")
     imgui.PopTextWrapPos()
+
+    if AUTH.loading then
+        -- экран «Загрузка...»: крутящийся индикатор, меняющиеся статусы и полоска прогресса
+        local now = imgui.GetTime()
+        local k = clamp((now - AUTH.loading.t) / 3.0, 0, 1)
+        local dl = imgui.GetWindowDrawList()
+        local cx, cy = p.x + W / 2, p.y + 165
+        for i = 0, 11 do
+            local ang = i / 12 * math.pi * 2 - now * 6
+            local fade = ((i / 12) - (now * 1.5) % 1) % 1
+            dl:AddCircleFilled(imgui.ImVec2(cx + math.cos(ang) * 34, cy + math.sin(ang) * 34), 5.5,
+                col32(ac[1], ac[2], ac[3], 0.15 + 0.85 * (1 - fade)), 12)
+        end
+        local steps = { "Подключение к серверу...", "Проверка кода...", "Верификация никнейма...", "Доступ разрешён" }
+        local st = steps[math.min(#steps, 1 + math.floor(k * #steps))]
+        imgui.SetCursorPos(imgui.ImVec2(0, 232))
+        imgui.SetWindowFontScale(1.6)
+        local dots = string.rep(".", math.floor(now * 3) % 4)
+        local title = "Загрузка" .. dots
+        imgui.SetCursorPosX((W - imgui.CalcTextSize("Загрузка...").x) / 2)
+        imgui.Text(title)
+        imgui.SetWindowFontScale(1.1)
+        imgui.SetCursorPosX((W - imgui.CalcTextSize(st).x) / 2)
+        imgui.TextColored(imgui.ImVec4(0.65, 0.65, 0.72, 1), st)
+        imgui.SetCursorPos(imgui.ImVec2(60, H - 46))
+        imgui.PushStyleColor(imgui.Col.PlotHistogram, accent_vec(1.1))
+        imgui.ProgressBar(k, imgui.ImVec2(W - 120, 10), "")
+        imgui.PopStyleColor(1)
+        imgui.SetWindowFontScale(1.0)
+        imgui.End()
+        imgui.PopStyleColor(1)
+        if k >= 1 then AUTH.finish() end
+        return
+    end
 
     imgui.SetCursorPos(imgui.ImVec2(26, 150))
     imgui.SetNextItemWidth(W - 52)
@@ -1887,12 +1933,13 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
     imgui.SetWindowFontScale(1.0)
     imgui.End()
     imgui.PopStyleColor(1)
-end, function() AUTH.open[0] = false end))
+end, function() AUTH.open[0] = false; AUTH.loading = nil end))
 
 local function toggle_menu()
     if not AUTH.ok then
         -- нет доступа: показываем окно авторизации вместо меню
         main_window[0] = false
+        AUTH.loading = nil
         AUTH.open[0] = not AUTH.open[0]
         if AUTH.open[0] and ffi.string(AUTH.nick) == "" then
             local okn, id = pcall(function() local _, i = sampGetPlayerIdByCharHandle(PLAYER_PED); return sampGetPlayerNickname(i) end)
