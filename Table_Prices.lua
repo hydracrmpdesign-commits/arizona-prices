@@ -267,7 +267,19 @@ end
 local UI_CFG = {
     accent = {0.18, 0.45, 0.85}, opacity = 1.0, overlay_scale = 1.0, open_key = 0, toasts = true, toast_corner = 3,
     border_mode = 1, border_speed = 1.0, shadow = true, font = "seguisb",
-    win_w = 835, win_h = 500,
+    win_w = 835, win_h = 500, bg_fx = true, splash = true,
+}
+
+-- Все эффекты интерфейса (плавное открытие, анимации вкладок и таблицы, фон, заставка) лежат в одной таблице UIFX
+local UIFX = {
+    alpha = 0,        -- текущая прозрачность окна (плавно растёт при открытии, падает при закрытии)
+    m = 1,            -- множитель прозрачности для ручного рисования (см. col32)
+    base = 1,         -- прозрачность содержимого вкладки
+    tab_t = -10,      -- момент смены вкладки
+    table_t = -10,    -- момент начала каскадной анимации строк таблицы
+    was_open = false,
+    splashed = false, -- заставка уже показана в этой игровой сессии
+    TAB_ORDER = { 1, 2, 3, 4, 8, 6, 5, 7 }, -- порядок вкладок слева (цифры 1-8 на клавиатуре)
 }
 
 -- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
@@ -304,7 +316,7 @@ end
 
 -- ===================== Оформление: цвета, рамка с переливами, тень =====================
 local function col32(r, g, b, a)
-    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a))
+    return imgui.ColorConvertFloat4ToU32(imgui.ImVec4(r, g, b, a * UIFX.m))
 end
 
 local function hsv_to_rgb(h, s, v)
@@ -815,27 +827,110 @@ end
 
 local function draw_sidebar_bg(wpos)
     local dl = imgui.GetWindowDrawList()
-    local col = imgui.ColorConvertFloat4ToU32(dark(0.088, 1.0))
+    local col = imgui.ColorConvertFloat4ToU32(dark(0.088, UIFX.m))
     dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col, 12)
     dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col)
     dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h - 8), imgui.GetColorU32(imgui.Col.Separator), 1.0)
 end
 
-local function sidebar_tab(label, id)
+-- ===================== Эффекты интерфейса =====================
+-- Устанавливает прозрачность всего, что рисуется дальше (и стандартных виджетов, и ручного рисования)
+function UIFX.set_alpha(a)
+    a = clamp(a, 0, 1)
+    UIFX.m = a
+    pcall(function() imgui.GetStyle().Alpha = a end)
+end
+
+-- Переключение вкладки с запуском анимации
+function UIFX.go_tab(id)
+    if id ~= current_tab then
+        current_tab = id
+        local now = imgui.GetTime()
+        UIFX.tab_t, UIFX.table_t = now, now
+    end
+end
+
+-- Вызывается в начале каждого кадра меню: плавное появление и исчезновение окна, заставка, горячие клавиши
+function UIFX.tick()
+    local dt = imgui.GetIO().DeltaTime
+    local open = main_window[0]
+    local target = open and 1 or 0
+    UIFX.alpha = UIFX.alpha + (target - UIFX.alpha) * math.min(1, dt * (open and 11 or 15))
+    if not open and UIFX.alpha < 0.03 then UIFX.alpha = 0 end
+    if open and UIFX.alpha > 0.99 then UIFX.alpha = 1 end
+    if open and not UIFX.was_open then
+        local now = imgui.GetTime()
+        UIFX.table_t, UIFX.tab_t = now, now
+        if UI_CFG.splash and not UIFX.splashed then
+            UIFX.splash_t = now
+            UIFX.splashed = true
+        end
+    end
+    UIFX.was_open = open
+    if UIFX.pending_tab then
+        UIFX.go_tab(UIFX.pending_tab)
+        UIFX.pending_tab = nil
+    end
+end
+
+-- Бегущая полоска слева у активной вкладки: плавно «переезжает» на новую
+function UIFX.draw_bar(wpos)
+    if not UIFX.bar_ty then return end
+    local dt = imgui.GetIO().DeltaTime
+    if not UIFX.bar_cur then UIFX.bar_cur = UIFX.bar_ty end
+    UIFX.bar_cur = UIFX.bar_cur + (UIFX.bar_ty - UIFX.bar_cur) * math.min(1, dt * 16)
+    local ac = UI_CFG.accent
+    local x, y = wpos.x + UIFX.bar_x, wpos.y + UIFX.bar_cur
+    imgui.GetWindowDrawList():AddRectFilled(imgui.ImVec2(x, y - 13), imgui.ImVec2(x + 3, y + 13),
+        col32(math.min(1, ac[1] * 1.15), math.min(1, ac[2] * 1.15), math.min(1, ac[3] * 1.15), 1), 2)
+end
+
+-- Анимированный фон вкладки: медленные цветные пятна и поднимающиеся искры (рисуется под содержимым)
+function UIFX.draw_bg()
+    local p, s = imgui.GetWindowPos(), imgui.GetWindowSize()
+    local dl = imgui.GetWindowDrawList()
+    local t, ac = imgui.GetTime(), UI_CFG.accent
+    for i = 1, 3 do
+        local cx = p.x + s.x * (0.5 + 0.38 * math.sin(t * 0.11 * i + i * 2.1))
+        local cy = p.y + s.y * (0.5 + 0.38 * math.cos(t * 0.09 * i + i * 1.3))
+        for r = 4, 1, -1 do
+            dl:AddCircleFilled(imgui.ImVec2(cx, cy), r * 55, col32(ac[1], ac[2], ac[3], 0.014), 32)
+        end
+    end
+    for i = 1, 26 do
+        local sp = 10 + (i * 7) % 17
+        local x = p.x + ((i * 137) % 100) / 100 * s.x + math.sin(t * 0.5 + i) * 12
+        local y = p.y + s.y - ((t * sp + i * 61) % (s.y + 20)) + 10
+        local tw = 0.5 + 0.5 * math.sin(t * 1.5 + i * 1.7)
+        dl:AddCircleFilled(imgui.ImVec2(x, y), 1.2 + (i % 3) * 0.7,
+            col32(ac[1] * 0.5 + 0.5, ac[2] * 0.5 + 0.5, ac[3] * 0.5 + 0.5, 0.05 + 0.14 * tw), 8)
+    end
+end
+
+local function sidebar_tab(label, id, tip)
     local active = (current_tab == id)
+    local ac = UI_CFG.accent
     if active then
         imgui.PushStyleColor(imgui.Col.Button, blend(0.115, 0.28))
     end
     imgui.SetWindowFontScale(1.15)
-    if imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, LAYOUT.tab_h)) then
-        current_tab = id
-    end
+    local clicked = imgui.Button(label .. "##tab" .. id, imgui.ImVec2(SIDEBAR_W - 10, LAYOUT.tab_h))
+    local hovered = imgui.IsItemHovered()
     imgui.SetWindowFontScale(1.0)
+    if clicked then UIFX.go_tab(id) end
+    if hovered and tip then imgui.SetTooltip(tip) end
     if active then
         imgui.PopStyleColor(1)
         local rmin, rmax = imgui.GetItemRectMin(), imgui.GetItemRectMax()
-        local mid = (rmin.y + rmax.y) / 2
-        imgui.GetWindowDrawList():AddRectFilled(imgui.ImVec2(rmin.x + 2, mid - 13), imgui.ImVec2(rmin.x + 5, mid + 13), imgui.ColorConvertFloat4ToU32(accent_vec(1.15)), 2)
+        local wp = imgui.GetWindowPos()
+        UIFX.bar_ty = (rmin.y + rmax.y) / 2 - wp.y
+        UIFX.bar_x = rmin.x + 2 - wp.x
+        -- мягкое свечение вокруг активной вкладки
+        local dl = imgui.GetWindowDrawList()
+        for i = 3, 1, -1 do
+            dl:AddRect(imgui.ImVec2(rmin.x - i * 1.5, rmin.y - i * 1.5), imgui.ImVec2(rmax.x + i * 1.5, rmax.y + i * 1.5),
+                col32(ac[1], ac[2], ac[3], 0.07 * (4 - i)), 8 + i, 15, 1.2)
+        end
     end
 end
 
@@ -1067,7 +1162,7 @@ end
 
 -- ===================== Новые разделы: PayDay, фразы, о скрипте =====================
 local settings_path = getWorkingDirectory() .. "\\config\\arizona_prices_settings.json"
-local settings = { ui = UI_CFG, payday = { enabled = false, x = 20, y = 300 }, phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
+local settings = { ui = UI_CFG, favs = {}, notes = "", payday = { enabled = false, x = 20, y = 300 }, phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
 
 local function load_settings()
     local data = safe_read_json(settings_path)
@@ -1090,6 +1185,14 @@ local function load_settings()
         settings.clock.x = tonumber(data.clock.x) or 20
         settings.clock.y = tonumber(data.clock.y) or 340
     end
+    if type(data.favs) == "table" then
+        local f = {}
+        for k, v in pairs(data.favs) do
+            if type(k) == "string" and v == true then f[k] = true end
+        end
+        settings.favs = f
+    end
+    if type(data.notes) == "string" then settings.notes = data.notes:sub(1, 8000) end
     if type(data.ui) == "table" then
         local u = data.ui
         if type(u.accent) == "table" and tonumber(u.accent[1]) and tonumber(u.accent[2]) and tonumber(u.accent[3]) then
@@ -1103,6 +1206,8 @@ local function load_settings()
         UI_CFG.border_mode = clamp(math.floor(tonumber(u.border_mode) or 1), 0, 3)
         UI_CFG.border_speed = clamp(tonumber(u.border_speed) or 1.0, 0.2, 3.0)
         UI_CFG.shadow = (u.shadow ~= false)
+        UI_CFG.bg_fx = (u.bg_fx ~= false)
+        UI_CFG.splash = (u.splash ~= false)
         if type(u.font) == "string" then UI_CFG.font = u.font end
         UI_CFG.win_w = clamp(math.floor(tonumber(u.win_w) or 835), 700, 2400)
         UI_CFG.win_h = clamp(math.floor(tonumber(u.win_h) or 500), 400, 1400)
@@ -1121,6 +1226,15 @@ local function save_settings()
 end
 
 safe_call("load_settings", load_settings)
+
+-- избранные предметы и заметки
+UIFX.notes = imgui.new.char[8192]()
+imgui.StrCopy(UIFX.notes, settings.notes or "")
+
+function UIFX.toggle_fav(name)
+    if settings.favs[name] then settings.favs[name] = nil else settings.favs[name] = true end
+    save_settings()
+end
 
 local payday_on = imgui.new.bool(settings.payday.enabled)
 local payday_edit = false
@@ -1532,7 +1646,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.8"
+local SCRIPT_VERSION = "2.6"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1786,6 +1900,8 @@ local sui = {
     toasts = imgui.new.bool(UI_CFG.toasts),
     border_speed = imgui.new.float(UI_CFG.border_speed),
     shadow = imgui.new.bool(UI_CFG.shadow),
+    bg_fx = imgui.new.bool(UI_CFG.bg_fx),
+    splash = imgui.new.bool(UI_CFG.splash),
     font_pending = false,
 }
 
@@ -1977,6 +2093,27 @@ local function on_window_message(msg, wparam, lparam)
     end
 
     if is_repeat then return end
+
+    -- горячие клавиши внутри открытого меню: цифры 1-8 переключают вкладки, Ctrl+F - поиск по таблице
+    if main_window[0] and UIFX.alpha > 0.5 and not hk.typing then
+        local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
+        if not (okc and busy) then
+            if wparam >= 0x31 and wparam <= 0x38 then
+                UIFX.pending_tab = UIFX.TAB_ORDER[wparam - 0x30]
+                consumeWindowMessage(true, true)
+                return
+            elseif wparam == 0x46 then
+                local okk, ctrl = pcall(isKeyDown, 0x11)
+                if okk and ctrl then
+                    UIFX.pending_tab = 1
+                    UIFX.focus_search = true
+                    consumeWindowMessage(true, true)
+                    return
+                end
+            end
+        end
+    end
+
     local key = UI_CFG.open_key
     if key and key ~= 0 and wparam == key then
         local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
@@ -2094,6 +2231,14 @@ local function draw_settings_tab()
             UI_CFG.shadow = sui.shadow[0]
             mark_ui_dirty()
         end
+        if imgui.Checkbox("Анимированный фон##bgfx", sui.bg_fx) then
+            UI_CFG.bg_fx = sui.bg_fx[0]
+            mark_ui_dirty()
+        end
+        if imgui.Checkbox("Заставка при первом открытии меню##splash", sui.splash) then
+            UI_CFG.splash = sui.splash[0]
+            mark_ui_dirty()
+        end
 
         sub_title("FONT", "Шрифт")
         local font_name = FONT_AVAILABLE[1].name
@@ -2199,6 +2344,31 @@ local function draw_settings_tab()
     imgui.EndChild()
 end
 
+local function draw_notes_tab()
+    section_header(ic("NOTE_STICKY", ""), "Заметки")
+    if imgui.BeginChild("##notes_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
+        imgui.TextDisabled("Записывай сюда всё важное: цены, договорённости, ники. Сохраняется само.")
+        imgui.Spacing()
+        imgui.SetWindowFontScale(1.15)
+        local h = imgui.GetContentRegionAvail().y - 48
+        if imgui.InputTextMultiline("##notes_text", UIFX.notes, ffi.sizeof(UIFX.notes), imgui.ImVec2(-1, math.max(80, h))) then
+            settings.notes = ffi.string(UIFX.notes)
+            mark_ui_dirty()
+        end
+        imgui.SetWindowFontScale(1.0)
+        local used = math.floor(#settings.notes / 81.91)
+        imgui.AlignTextToFramePadding()
+        imgui.TextDisabled("Заполнено: " .. used .. "%")
+        imgui.SameLine()
+        if imgui.Button(ic("TRASH_CAN", "") .. " Очистить##notes_clear", imgui.ImVec2(130, 28)) then
+            imgui.StrCopy(UIFX.notes, "")
+            settings.notes = ""
+            mark_ui_dirty()
+        end
+    end
+    imgui.EndChild()
+end
+
 local function draw_extra_tab(id)
     if id == 3 then
         draw_payday_tab()
@@ -2210,6 +2380,8 @@ local function draw_extra_tab(id)
         draw_time_tab()
     elseif id == 7 then
         draw_settings_tab()
+    elseif id == 8 then
+        draw_notes_tab()
     end
 end
 
@@ -2311,8 +2483,8 @@ local function layout_update(wsz)
         imgui.SetWindowSize(wsz, imgui.Cond.Always)
     end
     LAYOUT.w, LAYOUT.h = wsz.x, wsz.y
-    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 7) - 5, 28, 42)
-    LAYOUT.block_y = 5 + 7 * (LAYOUT.tab_h + 5) + 6
+    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 8) - 5, 26, 42)
+    LAYOUT.block_y = 5 + 8 * (LAYOUT.tab_h + 5) + 6
     local w, h = math.floor(wsz.x + 0.5), math.floor(wsz.y + 0.5)
     if w ~= UI_CFG.win_w or h ~= UI_CFG.win_h then
         UI_CFG.win_w, UI_CFG.win_h = w, h
@@ -2320,9 +2492,52 @@ local function layout_update(wsz)
     end
 end
 
-imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
+-- Заставка при первом открытии меню: логотип, версия и полоска загрузки (клик по ней закрывает)
+function UIFX.draw_splash(wpos)
+    if not UIFX.splash_t then return end
+    local V = imgui.ImVec2
+    local el = imgui.GetTime() - UIFX.splash_t
+    local dur = 2.0
+    if el >= dur then
+        UIFX.splash_t = nil
+        return
+    end
+    imgui.SetCursorPos(V(0, 0))
+    if imgui.InvisibleButton("##splash_block", V(LAYOUT.w, LAYOUT.h)) then
+        UIFX.splash_t = nil
+        return
+    end
+    local a = (el < 1.35) and 1 or clamp(1 - (el - 1.35) / (dur - 1.35), 0, 1)
+    local ac = UI_CFG.accent
+    local dl = imgui.GetWindowDrawList()
+    local x1, y1 = wpos.x + LAYOUT.w, wpos.y + LAYOUT.h
+    dl:AddRectFilled(wpos, V(x1, y1), col32(0.04, 0.035, 0.06, 0.98 * a), 12)
+    local cx, cy = (wpos.x + x1) / 2, (wpos.y + y1) / 2 - 24
+    for i = 5, 1, -1 do
+        dl:AddCircleFilled(V(cx, cy), 40 + i * 26, col32(ac[1], ac[2], ac[3], 0.035 * a), 40)
+    end
+    local grow = 1 + 0.12 * (1 - clamp(el / 0.7, 0, 1)) ^ 2
+    local title = "Arizona Prices"
+    imgui.SetWindowFontScale(2.6 * grow)
+    local ts = imgui.CalcTextSize(title)
+    dl:AddText(V(cx - ts.x / 2 + 2, cy - ts.y / 2 + 2), col32(0, 0, 0, 0.6 * a), title)
+    dl:AddText(V(cx - ts.x / 2, cy - ts.y / 2), col32(1, 1, 1, a), title)
+    imgui.SetWindowFontScale(1.2)
+    local sub = "Версия " .. SCRIPT_VERSION .. "  |  t.me/arizona_prices"
+    local ss = imgui.CalcTextSize(sub)
+    dl:AddText(V(cx - ss.x / 2, cy + ts.y / 2 + 12), col32(0.75, 0.78, 0.9, a), sub)
+    imgui.SetWindowFontScale(1.0)
+    local bw = 240
+    local bx, by = cx - bw / 2, cy + ts.y / 2 + 62
+    dl:AddRectFilled(V(bx, by), V(bx + bw, by + 6), col32(1, 1, 1, 0.10 * a), 3)
+    dl:AddRectFilled(V(bx, by), V(bx + bw * clamp(el / (dur - 0.3), 0, 1), by + 6), col32(ac[1], ac[2], ac[3], a), 3)
+end
+
+imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha > 0 end,
     guard_frame("menu", function(player)
-        if main_window[0] then 
+        UIFX.tick()
+        if main_window[0] or UIFX.alpha > 0 then
+        UIFX.set_alpha(UIFX.alpha)
             local sw, sh = getScreenResolution()
             imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.FirstUseEver, imgui.ImVec2(0.5, 0.5)) 
             if LAYOUT.force then
@@ -2335,7 +2550,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 imgui.SetNextWindowSize(imgui.ImVec2(UI_CFG.win_w, UI_CFG.win_h), imgui.Cond.FirstUseEver)
             end
             pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
-            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
+            if imgui.Begin(u8("Arizona Prices##main_window"), main_window[0] and main_window or nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
                 layout_update(imgui.GetWindowSize())
                 local wpos = imgui.GetWindowPos()
                 local win_cx, win_cy = wpos.x + LAYOUT.w / 2, wpos.y + LAYOUT.h / 2
@@ -2344,23 +2559,31 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 -- Левая панель с вкладками
                 draw_sidebar_bg(wpos)
                 imgui.SetCursorPos(imgui.ImVec2(5, 5))
-                sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1)
-                sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2)
-                sidebar_tab(ic("CLOCK", "") .. " Отчет до PayDay", 3)
-                sidebar_tab(ic("COMMENT_DOTS", "") .. " Фразы", 4)
-                sidebar_tab(ic("GLOBE", "") .. " Время стран", 6)
-                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5)
-                sidebar_tab(ic("GEAR", "") .. " Настройки", 7)
+                sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1, "Таблица цен предметов (клавиша 1)\nCtrl+F - быстрый поиск")
+                sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
+                sidebar_tab(ic("CLOCK", "") .. " Отчет до PayDay", 3, "Таймер до PayDay на экране (клавиша 3)")
+                sidebar_tab(ic("COMMENT_DOTS", "") .. " Фразы", 4, "Быстрые фразы в чат (клавиша 4)")
+                sidebar_tab(ic("NOTE_STICKY", "") .. " Заметки", 8, "Ваши заметки (клавиша 5)")
+                sidebar_tab(ic("GLOBE", "") .. " Время стран", 6, "Время в других странах (клавиша 6)")
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 7)")
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 8)")
+                UIFX.draw_bar(wpos)
                 draw_update_block()
 
                 -- Правая часть (содержимое выбранной вкладки)
-                imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W, 0))
+                local tk = clamp((imgui.GetTime() - UIFX.tab_t) / 0.30, 0, 1)
+                local te = 1 - (1 - tk) ^ 3
+                local slide = (1 - te) * 30
+                UIFX.base = UIFX.alpha * te
+                UIFX.set_alpha(UIFX.base)
+                imgui.SetCursorPos(imgui.ImVec2(SIDEBAR_W + slide, 0))
                 local content_flags = imgui.WindowFlags.AlwaysUseWindowPadding or 0
                 if not (current_tab == 2 and (LAYOUT.h < 495 or LAYOUT.w < 830)) then
                     content_flags = bit.bor(content_flags, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)
                 end
-                local content_visible = imgui.BeginChild("##content", imgui.ImVec2(LAYOUT.w - SIDEBAR_W, LAYOUT.h), false, content_flags)
+                local content_visible = imgui.BeginChild("##content", imgui.ImVec2(LAYOUT.w - SIDEBAR_W - slide, LAYOUT.h), false, content_flags)
                 if content_visible then
+                if UI_CFG.bg_fx then pcall(UIFX.draw_bg) end
                 if current_tab == 1 then
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
@@ -2374,6 +2597,10 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
                 imgui.SameLine(140) 
                 imgui.SetNextItemWidth(math.max(90, LAYOUT.w - SIDEBAR_W - 329)) 
+                if UIFX.focus_search then
+                    imgui.SetKeyboardFocusHere()
+                    UIFX.focus_search = false
+                end
                 imgui.InputTextWithHint("##search", FA.MAGNIFYING_GLASS .. " Поиск", buf_search, ffi.sizeof(buf_search))
                 imgui.SameLine() 
                 imgui.SetNextItemWidth(150)
@@ -2402,12 +2629,21 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 imgui.PopStyleColor(1) 
                 imgui.Spacing()
 
+                local q_now = ffi.string(buf_search)
+                if q_now ~= UIFX.last_q or current_sort[0] ~= UIFX.last_sort then
+                    UIFX.last_q, UIFX.last_sort = q_now, current_sort[0]
+                    UIFX.table_t = imgui.GetTime()
+                end
+                if not UIFX.hint_shown then
+                    UIFX.hint_shown = true
+                    notify("Подсказка: правая кнопка мыши по предмету - быстрые действия, звёздочка - избранное", "info", 7)
+                end
                 if imgui.BeginChild("##table_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then 
                     local table_style = imgui.GetStyle() 
                     local table_start_x = imgui.GetCursorScreenPos().x
                     local table_top_y = imgui.GetCursorScreenPos().y - table_style.WindowPadding.y 
                     local separator_spacing = table_style.ItemSpacing.y 
-                    local col_w0, col_w1, col_w2, col_w3 = math.max(110, math.floor(imgui.GetContentRegionAvail().x) - 340), 140, 120, 80
+                    local col_w0, col_w1, col_w2, col_w3 = math.max(110, math.floor(imgui.GetContentRegionAvail().x) - 368), 140, 120, 108
                     
                     imgui.Columns(4, "item_table", false) 
                     imgui.SetColumnWidth(0, col_w0) 
@@ -2463,15 +2699,35 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         table.sort(display_indices, function(a, b) local name_a = (items_list[a].item or ""):lower() local name_b = (items_list[b].item or ""):lower() return name_a < name_b end)
                     end
 
+                    if next(settings.favs) then
+                        -- избранные поднимаем наверх (порядок внутри групп сохраняется)
+                        local favs_first, rest = {}, {}
+                        for _, ix in ipairs(display_indices) do
+                            if items_list[ix] and settings.favs[items_list[ix].item] then
+                                favs_first[#favs_first + 1] = ix
+                            else
+                                rest[#rest + 1] = ix
+                            end
+                        end
+                        for _, ix in ipairs(rest) do favs_first[#favs_first + 1] = ix end
+                        display_indices = favs_first
+                    end
+                    local row_now = imgui.GetTime()
                     for ri, idx in ipairs(display_indices) do 
                         local item = items_list[idx]
                         if item then 
                             local row_y = imgui.GetCursorPosY() 
+                            local ra = clamp((row_now - UIFX.table_t - math.min(ri, 14) * 0.03) / 0.22, 0, 1)
+                            UIFX.set_alpha(UIFX.base * ra)
                             do
                                 local rp = imgui.GetCursorScreenPos()
                                 local rx1 = table_start_x + col_w0 + col_w1 + col_w2 + col_w3
                                 local r0, r1 = imgui.ImVec2(table_start_x, rp.y - 2), imgui.ImVec2(rx1, rp.y + 27)
                                 local row_hover = imgui.IsMouseHoveringRect(r0, r1)
+                                if row_hover and imgui.IsWindowHovered() and imgui.IsMouseClicked(1) then
+                                    selected_item_name = item.item
+                                    UIFX.ctx_open = true
+                                end
                                 if row_hover and imgui.IsWindowHovered() and imgui.IsMouseClicked(0) then
                                     selected_item_name = item.item
                                 end
@@ -2535,10 +2791,18 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                             end
 
                             imgui.NextColumn()
-                            local buttons_total_width = 28 + 5 + 28 
+                            local buttons_total_width = 28 * 3 + 10
                             imgui.SetCursorPosY(row_y) 
                             imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - buttons_total_width) * 0.5))
                             
+                            local is_fav = settings.favs[item.item] == true
+                            imgui.PushStyleColor(imgui.Col.Text, is_fav and imgui.ImVec4(1.0, 0.82, 0.25, 1.0) or imgui.ImVec4(0.50, 0.52, 0.58, 1.0))
+                            if imgui.Button(ic("STAR", "*") .. "##fav_" .. idx, imgui.ImVec2(28, 24)) then
+                                UIFX.toggle_fav(item.item)
+                            end
+                            imgui.PopStyleColor(1)
+                            if imgui.IsItemHovered() then imgui.SetTooltip(is_fav and "Убрать из избранного" or "В избранное") end
+                            imgui.SameLine()
                             if imgui.Button(FA.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
                                 open_edit_modal(idx) 
                             end 
@@ -2555,6 +2819,39 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                         end
                     end
                     imgui.Columns(1)
+                    UIFX.set_alpha(UIFX.base)
+                    if UIFX.ctx_open then
+                        imgui.OpenPopup("##row_ctx")
+                        UIFX.ctx_open = false
+                    end
+                    if imgui.BeginPopup("##row_ctx") then
+                        local cur
+                        for _, v in ipairs(items_list) do
+                            if v.item == selected_item_name then cur = v; break end
+                        end
+                        if cur then
+                            local line = cur.item .. ": скупка " .. format_price(cur.buy) .. " / продажа " .. format_price(cur.sell)
+                            imgui.TextColored(accent_vec(1.3), cur.item)
+                            imgui.Separator()
+                            if imgui.Selectable(ic("COMMENT_DOTS", "") .. "  Вставить в строку чата##ctx_chat") then
+                                defer(function()
+                                    sampSetChatInputEnabled(true)
+                                    sampSetChatInputText(u8:decode(line))
+                                end)
+                            end
+                            if imgui.Selectable(ic("COPY", "") .. "  Скопировать в буфер##ctx_copy") then
+                                imgui.SetClipboardText(line)
+                                notify("Скопировано: " .. line, "ok", 4)
+                            end
+                            local isf = settings.favs[cur.item] == true
+                            if imgui.Selectable(ic("STAR", "*") .. (isf and "  Убрать из избранного" or "  В избранное") .. "##ctx_fav") then
+                                UIFX.toggle_fav(cur.item)
+                            end
+                        else
+                            imgui.Text("Предмет не найден")
+                        end
+                        imgui.EndPopup()
+                    end
 
                     if table_bottom_y > table_top_y then 
                         local draw_list = imgui.GetWindowDrawList() 
@@ -2721,14 +3018,17 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                 end
                 if content_visible then pcall(draw_resize_grip) end
                 imgui.EndChild()
+                UIFX.set_alpha(UIFX.alpha)
+                UIFX.draw_splash(wpos)
 
                 draw_window_fx(wpos.x, wpos.y, wpos.x + LAYOUT.w, wpos.y + LAYOUT.h)
                 imgui.End()
             else
                 imgui.End()
             end
+            UIFX.set_alpha(1)
         end
-    end, function() main_window[0] = false; modal_window[0] = false; hk.binding = false end)
+    end, function() main_window[0] = false; modal_window[0] = false; hk.binding = false; UIFX.alpha = 0; UIFX.set_alpha(1) end)
 )
 
 -- ===================== Большое окно «старая версия» =====================
