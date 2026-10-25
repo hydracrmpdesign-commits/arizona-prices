@@ -610,9 +610,8 @@ local function draw_toasts()
     local H, GAP, MARGIN = 46, 8, 20
     for i, t in ipairs(toasts) do
         local kind = TOAST_KINDS[t.kind] or TOAST_KINDS.info
-        local icon = ic(kind.icon, "")
         local ts = imgui.CalcTextSize(t.text)
-        local w = math.min(760, ts.x + 74)
+        local w = math.min(760, ts.x + 84)
         local age = now - t.t0
         local pr = math.min(1, age / 0.25)
         local ease = 1 - (1 - pr) ^ 3
@@ -623,15 +622,33 @@ local function draw_toasts()
         local y = bottom and (sh - MARGIN - 80 - H - slot * (H + GAP)) or (MARGIN + slot * (H + GAP))
         local c = kind.color or UI_CFG.accent
         local ty = y + (H - ts.y) / 2
-        local isz = imgui.CalcTextSize(icon)
         local p0, p1 = imgui.ImVec2(x, y), imgui.ImVec2(x + w, y + H)
+        local cx, cy = x + 28, y + H / 2
         dl:AddRectFilled(p0, p1, col32(0.07, 0.075, 0.09, 0.96 * alpha), 10)
         pcall(function()
             dl:AddRect(p0, p1, col32(c[1], c[2], c[3], 0.60 * alpha), 10, 0, 1.5)
-            dl:AddCircleFilled(imgui.ImVec2(x + 25, y + H / 2), 14, col32(c[1], c[2], c[3], 0.18 * alpha), 24)
+            dl:AddCircleFilled(imgui.ImVec2(cx, cy), 17, col32(c[1], c[2], c[3], 0.20 * alpha), 28)
         end)
-        dl:AddText(imgui.ImVec2(x + 25 - isz.x / 2, y + (H - isz.y) / 2), col32(c[1], c[2], c[3], alpha), icon)
-        dl:AddText(imgui.ImVec2(x + 50, ty), col32(1, 1, 1, alpha), t.text)
+        -- значок рисуем линиями, поэтому его размер не зависит от шрифта
+        local icol = col32(c[1], c[2], c[3], alpha)
+        local function seg(ax, ay, bx, by)
+            dl:AddLine(imgui.ImVec2(cx + ax, cy + ay), imgui.ImVec2(cx + bx, cy + by), icol, 3.0)
+        end
+        if t.kind == "ok" then
+            seg(-7, 0.5, -2.5, 5.5)
+            seg(-2.5, 5.5, 7.5, -5.5)
+            dl:AddCircleFilled(imgui.ImVec2(cx - 2.5, cy + 5.5), 1.5, icol, 12)
+        elseif t.kind == "err" then
+            seg(-6, -6, 6, 6)
+            seg(-6, 6, 6, -6)
+        elseif t.kind == "warn" then
+            seg(0, -8, 0, 2)
+            dl:AddCircleFilled(imgui.ImVec2(cx, cy + 7), 2.0, icol, 12)
+        else
+            dl:AddCircleFilled(imgui.ImVec2(cx, cy - 7), 2.0, icol, 12)
+            seg(0, -2.5, 0, 8)
+        end
+        dl:AddText(imgui.ImVec2(x + 56, ty), col32(1, 1, 1, alpha), t.text)
     end
 end
 
@@ -1402,7 +1419,7 @@ local function draw_phrases_tab()
             if imgui.IsItemHovered() then imgui.SetTooltip("Удалить фразу") end
             imgui.SameLine()
             imgui.AlignTextToFramePadding()
-            imgui.Text(phrase)
+            imgui.TextUnformatted(phrase)
         end
         if to_remove then
             table.remove(settings.phrases, to_remove)
@@ -1701,7 +1718,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "3.0"
+local SCRIPT_VERSION = "3.1"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2847,13 +2864,13 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                                 end
                                 truncated = truncated .. "..." 
                                 imgui.Text(truncated) 
-                                if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end 
+                                if imgui.IsItemHovered() then imgui.SetTooltip((item_text:gsub("%%", "%%%%"))) end 
                                 imgui.SameLine(col_w0 - icon_w - 6) 
                                 imgui.Text(FA.CIRCLE_QUESTION) 
-                                if imgui.IsItemHovered() then imgui.SetTooltip(item_text) end
+                                if imgui.IsItemHovered() then imgui.SetTooltip((item_text:gsub("%%", "%%%%"))) end
                             else 
                                 imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w0 - sz.x) * 0.5)) 
-                                imgui.Text(item_text)
+                                imgui.TextUnformatted(item_text)
                             end
 
                             imgui.NextColumn()
