@@ -1161,6 +1161,8 @@ end
 local function draw_payday_tab()
     section_header(ic("CLOCK", ""), "Отчет до PayDay")
     if imgui.BeginChild("##payday_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
+        imgui.SetWindowFontScale(1.35)
+        imgui.PushStyleVar(imgui.StyleVar.FramePadding, imgui.ImVec2(10, 8))
         imgui.TextWrapped("На экране появится надпись «До PayDay: N мин N сек». PayDay выплачивается каждые 30 минут: в :00 и :30.")
         imgui.Spacing()
         if imgui.Checkbox(" Включить", payday_on) then
@@ -1173,13 +1175,13 @@ local function draw_payday_tab()
         imgui.Text("Положение надписи на экране:")
         imgui.Spacing()
         if not payday_edit then
-            if imgui.Button(ic("UP_DOWN_LEFT_RIGHT", "") .. " Передвинуть надпись", imgui.ImVec2(260, 38)) then
+            if imgui.Button(ic("UP_DOWN_LEFT_RIGHT", "") .. " Передвинуть надпись", imgui.ImVec2(360, 56)) then
                 payday_edit = true
                 payday_on[0] = true
             end
         else
             imgui.TextColored(imgui.ImVec4(0.45, 1.00, 0.55, 1.00), "Перетащи надпись мышкой, затем нажми «Сохранить».")
-            if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение", imgui.ImVec2(260, 38)) then
+            if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение", imgui.ImVec2(360, 56)) then
                 settings.payday.x = payday_pos.x
                 settings.payday.y = payday_pos.y
                 settings.payday.enabled = payday_on[0]
@@ -1190,16 +1192,20 @@ local function draw_payday_tab()
         end
         imgui.Spacing()
         imgui.TextDisabled("Сейчас: " .. payday_text())
+        imgui.PopStyleVar(1)
+        imgui.SetWindowFontScale(1.0)
     end
     imgui.EndChild()
 end
 
 local function draw_phrases_tab()
     section_header(ic("COMMENT_DOTS", ""), "Фразы для автоотправки")
-    imgui.SetNextItemWidth(imgui.GetContentRegionAvail().x - 125)
+    imgui.SetWindowFontScale(1.3)
+    imgui.PushStyleVar(imgui.StyleVar.FramePadding, imgui.ImVec2(10, 9))
+    imgui.SetNextItemWidth(imgui.GetContentRegionAvail().x - 190)
     local enter = imgui.InputTextWithHint("##phrase_input", "Введи фразу или команду (например /time)", phrase_buf, ffi.sizeof(phrase_buf), imgui.InputTextFlags.EnterReturnsTrue)
     imgui.SameLine()
-    local add_clicked = imgui.Button(FA.CIRCLE_PLUS .. " Добавить##add_phrase", imgui.ImVec2(120, 0))
+    local add_clicked = imgui.Button(FA.CIRCLE_PLUS .. " Добавить##add_phrase", imgui.ImVec2(180, 0))
     if enter or add_clicked then
         local text = ffi.string(phrase_buf)
         if text:gsub("%s", "") ~= "" then
@@ -1209,19 +1215,19 @@ local function draw_phrases_tab()
         end
     end
     imgui.Spacing()
-    if imgui.BeginChild("##phrases_list", imgui.ImVec2(-1, -1), true) then
+    if imgui.BeginChild("##phrases_list", imgui.ImVec2(-1, -36), true) then
         if #settings.phrases == 0 then
             imgui.TextDisabled("Пока нет фраз. Добавь первую выше.")
         end
         local to_remove = nil
         for i, phrase in ipairs(settings.phrases) do
-            if imgui.Button(FA.PAPER_PLANE .. "##send_phrase_" .. i, imgui.ImVec2(36, 28)) then
+            if imgui.Button(FA.PAPER_PLANE .. "##send_phrase_" .. i, imgui.ImVec2(52, 40)) then
                 local txt = phrase
                 defer(function() sampSendChat(u8:decode(txt)) end)
             end
             if imgui.IsItemHovered() then imgui.SetTooltip("Отправить в чат") end
             imgui.SameLine()
-            if imgui.Button(FA.TRASH_CAN .. "##del_phrase_" .. i, imgui.ImVec2(36, 28)) then
+            if imgui.Button(FA.TRASH_CAN .. "##del_phrase_" .. i, imgui.ImVec2(52, 40)) then
                 to_remove = i
             end
             if imgui.IsItemHovered() then imgui.SetTooltip("Удалить фразу") end
@@ -1235,6 +1241,8 @@ local function draw_phrases_tab()
         end
     end
     imgui.EndChild()
+    imgui.PopStyleVar(1)
+    imgui.SetWindowFontScale(1.0)
 end
 
 local about_links = {
@@ -1249,6 +1257,7 @@ local about_links = {
 local function draw_about_tab()
     section_header(ic("CIRCLE_INFO", ""), "О скрипте")
     if imgui.BeginChild("##about_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
+        imgui.SetWindowFontScale(1.25)
         imgui.TextColored(imgui.ImVec4(0.30, 0.65, 1.00, 1.00), "Arizona Prices V2.0")
         imgui.TextWrapped("Спасибо, что пользуешься скриптом! Заходи в наши соцсети: там актуальные цены, новости и обновления. Нашёл ошибку или есть идея - пиши разработчику в личные сообщения.")
         imgui.Spacing()
@@ -1259,7 +1268,7 @@ local function draw_about_tab()
             imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(c[1] * 0.55, c[2] * 0.55, c[3] * 0.55, 1.00))
             imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(c[1] * 0.80, c[2] * 0.80, c[3] * 0.80, 1.00))
             imgui.PushStyleColor(imgui.Col.ButtonActive, imgui.ImVec4(c[1], c[2], c[3], 1.00))
-            if imgui.Button("##about_" .. i, imgui.ImVec2(-1, 46)) then
+            if imgui.Button("##about_" .. i, imgui.ImVec2(-1, 56)) then
                 if l.url then
                     open_url(l.url)
                 elseif l.copy then
@@ -1277,6 +1286,7 @@ local function draw_about_tab()
             dl:AddText(imgui.ImVec2(rmin.x + 18, cy - isz.y / 2), 0xFFFFFFFF, icon)
             imgui.PopStyleColor(3)
         end
+        imgui.SetWindowFontScale(1.0)
     end
     imgui.EndChild()
 end
@@ -1523,7 +1533,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.9"
+local SCRIPT_VERSION = "2.0"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2116,29 +2126,33 @@ end)
 -- свой уголок изменения размера: окно тянется по смещению мыши, форма курсора не меняется
 local grip = { on = false, mx = 0, my = 0, w = 0, h = 0 }
 local function draw_resize_grip()
-    local cw = LAYOUT.w - SIDEBAR_W
-    imgui.SetCursorPos(imgui.ImVec2(cw - 28, LAYOUT.h - 28 + imgui.GetScrollY()))
+    -- угол окна считаем по рабочей области (окно содержимого стоит в правом нижнем углу)
+    local wp, ws = imgui.GetWindowPos(), imgui.GetWindowSize()
+    local cx, cy = wp.x + ws.x, wp.y + ws.y
+    -- невидимая кнопка не даёт окну "уехать" при перетаскивании за угол
+    imgui.SetCursorPos(imgui.ImVec2(ws.x - 28, ws.y - 28 + imgui.GetScrollY()))
     imgui.InvisibleButton("##resize_grip", imgui.ImVec2(20, 20))
-    local hov = imgui.IsItemHovered()
-    local rmax = imgui.GetItemRectMax()
-    if imgui.IsItemActive() then
-        local mp = imgui.GetMousePos()
-        if not grip.on then
-            grip.on = true
-            grip.mx, grip.my, grip.w, grip.h = mp.x, mp.y, LAYOUT.w, LAYOUT.h
+    local mp = imgui.GetMousePos()
+    local hov = mp.x >= cx - 34 and mp.x <= cx + 4 and mp.y >= cy - 34 and mp.y <= cy + 4
+    if not grip.on and hov and imgui.IsMouseClicked(0) then
+        grip.on = true
+        grip.mx, grip.my, grip.w, grip.h = mp.x, mp.y, LAYOUT.w, LAYOUT.h
+    end
+    if grip.on then
+        if imgui.IsMouseDown(0) then
+            local sw, sh = getScreenResolution()
+            LAYOUT.req = {
+                w = clamp(grip.w + mp.x - grip.mx, 700, math.max(700, sw - 20)),
+                h = clamp(grip.h + mp.y - grip.my, 400, math.max(400, sh - 20)),
+            }
+        else
+            grip.on = false
         end
-        local sw, sh = getScreenResolution()
-        LAYOUT.req = {
-            w = clamp(grip.w + mp.x - grip.mx, 700, math.max(700, sw - 20)),
-            h = clamp(grip.h + mp.y - grip.my, 400, math.max(400, sh - 20)),
-        }
-    else
-        grip.on = false
     end
     local ac = UI_CFG.accent
     local a = (hov or grip.on) and 0.95 or 0.55
     imgui.GetWindowDrawList():AddTriangleFilled(
-        imgui.ImVec2(rmax.x, rmax.y), imgui.ImVec2(rmax.x, rmax.y - 14), imgui.ImVec2(rmax.x - 14, rmax.y),
+        imgui.ImVec2(cx - 6, cy - 6), imgui.ImVec2(cx - 6, cy - 22), imgui.ImVec2(cx - 22, cy - 6),
         col32(ac[1], ac[2], ac[3], a))
 end
 
