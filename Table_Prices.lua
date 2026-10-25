@@ -1382,7 +1382,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "1.6"
+local SCRIPT_VERSION = "1.7"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1960,6 +1960,35 @@ imgui.OnInitialize(function()
     safe_call("load_data", load_data)
 end)
 
+-- свой уголок изменения размера: окно тянется по смещению мыши, форма курсора не меняется
+local grip = { on = false, mx = 0, my = 0, w = 0, h = 0 }
+local function draw_resize_grip()
+    local cw = LAYOUT.w - SIDEBAR_W
+    imgui.SetCursorPos(imgui.ImVec2(cw - 28, LAYOUT.h - 28 + imgui.GetScrollY()))
+    imgui.InvisibleButton("##resize_grip", imgui.ImVec2(20, 20))
+    local hov = imgui.IsItemHovered()
+    local rmax = imgui.GetItemRectMax()
+    if imgui.IsItemActive() then
+        local mp = imgui.GetMousePos()
+        if not grip.on then
+            grip.on = true
+            grip.mx, grip.my, grip.w, grip.h = mp.x, mp.y, LAYOUT.w, LAYOUT.h
+        end
+        local sw, sh = getScreenResolution()
+        LAYOUT.req = {
+            w = clamp(grip.w + mp.x - grip.mx, 700, math.max(700, sw - 20)),
+            h = clamp(grip.h + mp.y - grip.my, 400, math.max(400, sh - 20)),
+        }
+    else
+        grip.on = false
+    end
+    local ac = UI_CFG.accent
+    local a = (hov or grip.on) and 0.95 or 0.55
+    imgui.GetWindowDrawList():AddTriangleFilled(
+        imgui.ImVec2(rmax.x, rmax.y), imgui.ImVec2(rmax.x, rmax.y - 14), imgui.ImVec2(rmax.x - 14, rmax.y),
+        col32(ac[1], ac[2], ac[3], a))
+end
+
 -- размеры окна: запоминаем в настройках, пересчитываем высоту вкладок левой панели
 local function layout_update(wsz)
     if wsz.x < 700 or wsz.y < 400 then
@@ -1984,11 +2013,14 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
             if LAYOUT.force then
                 LAYOUT.force = false
                 imgui.SetNextWindowSize(imgui.ImVec2(835, 500), imgui.Cond.Always)
+            elseif LAYOUT.req then
+                imgui.SetNextWindowSize(imgui.ImVec2(LAYOUT.req.w, LAYOUT.req.h), imgui.Cond.Always)
+                LAYOUT.req = nil
             else
                 imgui.SetNextWindowSize(imgui.ImVec2(UI_CFG.win_w, UI_CFG.win_h), imgui.Cond.FirstUseEver)
             end
             pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
-            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
+            if imgui.Begin(u8("Arizona Prices##main_window"), main_window, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse)) then
                 layout_update(imgui.GetWindowSize())
                 local wpos = imgui.GetWindowPos()
                 local win_cx, win_cy = wpos.x + LAYOUT.w / 2, wpos.y + LAYOUT.h / 2
@@ -2208,7 +2240,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     imgui.EndChild()
                 end
 
-                local add_w = imgui.GetContentRegionAvail().x - 70
+                local add_w = imgui.GetContentRegionAvail().x - 95
                 if imgui.Button(FA.CIRCLE_PLUS .. " Добавить предмет", imgui.ImVec2(add_w, 30)) then
                     open_add_modal() 
                 end
@@ -2352,6 +2384,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] end,
                     draw_extra_tab(current_tab)
                 end
                 end
+                if content_visible then draw_resize_grip() end
                 imgui.EndChild()
 
                 draw_window_fx(wpos.x, wpos.y, wpos.x + LAYOUT.w, wpos.y + LAYOUT.h)
