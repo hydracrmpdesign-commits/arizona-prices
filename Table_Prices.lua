@@ -1529,7 +1529,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.1"
+local SCRIPT_VERSION = "2.2"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2567,6 +2567,8 @@ imgui.OnFrame(function() return outdated_popup[0] end, guard_frame("outdated", f
     imgui.SetNextWindowFocus()
     local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoMove,
         imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
+    -- полностью непрозрачный фон, независимо от настройки прозрачности меню
+    imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.07, 0.095, 1.0))
     imgui.Begin("##outdated_window", nil, flags)
     local p = imgui.GetWindowPos()
     imgui.GetWindowDrawList():AddRectFilled(p, imgui.ImVec2(p.x + 580, p.y + 5), imgui.ColorConvertFloat4ToU32(imgui.ImVec4(1.00, 0.75, 0.15, 1.00)))
@@ -2606,6 +2608,7 @@ imgui.OnFrame(function() return outdated_popup[0] end, guard_frame("outdated", f
         outdated_popup[0] = false
     end
     imgui.End()
+    imgui.PopStyleColor(1)
 end, function() outdated_popup[0] = false end))
 
 function main()
