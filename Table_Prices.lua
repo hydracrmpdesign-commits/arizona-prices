@@ -305,7 +305,8 @@ end
 
 -- ===================== Внешний вид (настраивается во вкладке «Настройки») =====================
 local UI_CFG = {
-    accent = {0.18, 0.45, 0.85}, opacity = 1.0, overlay_scale = 1.0, open_key = 0, toasts = true, toast_corner = 3,
+    accent = {0.98, 0.55, 0.12}, opacity = 1.0, overlay_scale = 1.0, open_key = 0, toasts = true, toast_corner = 3,
+    halloween = true, -- Хэллоуин: фиолетовый фон, тыквы, летучие мыши, паутина
     border_mode = 1, border_speed = 1.0, shadow = true, font = "seguisb",
     win_w = 835, win_h = 500, bg_fx = true, splash = true,
 }
@@ -390,6 +391,9 @@ end
 -- тёмный цвет с лёгким оттенком акцента
 local function dark(l, a)
     local ac = UI_CFG.accent
+    if UI_CFG.halloween then
+        return imgui.ImVec4(math.min(1, l + 0.022), math.min(1, l + 0.002), math.min(1, l + 0.058), a or 1.0)
+    end
     return imgui.ImVec4(math.min(1, l + ac[1] * 0.04), math.min(1, l + ac[2] * 0.04), math.min(1, l + ac[3] * 0.06), a or 1.0)
 end
 
@@ -488,6 +492,7 @@ local function draw_window_fx(x0, y0, x1, y1)
         border_broken = true
         log_error("window_fx", err)
     end
+    if UI_CFG.halloween then UIFX.hw_safe(UIFX.hw_front, x0, y0, x1, y1) end
 end
 
 function apply_theme()
@@ -888,6 +893,7 @@ local function draw_sidebar_bg(wpos)
     dl:AddRectFilled(wpos, imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col, 12)
     dl:AddRectFilled(imgui.ImVec2(wpos.x + 14, wpos.y), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h), col)
     dl:AddLine(imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + 8), imgui.ImVec2(wpos.x + SIDEBAR_W - 1, wpos.y + LAYOUT.h - 8), imgui.GetColorU32(imgui.Col.Separator), 1.0)
+    if UI_CFG.halloween then UIFX.hw_safe(UIFX.hw_web, dl, wpos.x + 7, wpos.y + LAYOUT.h - 7, 84, 1, -1, 0.18) end
 end
 
 -- ===================== Эффекты интерфейса =====================
@@ -977,6 +983,144 @@ function UIFX.draw_bg()
         dl:AddCircleFilled(imgui.ImVec2(x, y), 1.2 + (i % 3) * 0.7,
             col32(ac[1] * 0.5 + 0.5, ac[2] * 0.5 + 0.5, ac[3] * 0.5 + 0.5, 0.05 + 0.14 * tw), 8)
     end
+end
+
+-- ===================== Хэллоуин =====================
+-- Всё рисуется простыми фигурами (круги, треугольники, линии). При любой ошибке украшения сами отключаются.
+function UIFX.hw_safe(fn, ...)
+    if UIFX.hw_broken then return end
+    local ok, err = pcall(fn, ...)
+    if not ok then
+        UIFX.hw_broken = true
+        pcall(log_error, "halloween", err)
+    end
+end
+
+-- закрашенный треугольник (вершины переставляются, чтобы обход всегда был по часовой)
+function UIFX.hw_tri(dl, col, ax, ay, bx, by, cx, cy)
+    local V = imgui.ImVec2
+    if (bx - ax) * (cy - ay) - (by - ay) * (cx - ax) < 0 then
+        bx, by, cx, cy = cx, cy, bx, by
+    end
+    dl:AddTriangleFilled(V(ax, ay), V(bx, by), V(cx, cy), col)
+end
+
+-- тыква: cx, cy - центр, r - размер, k - прозрачность, hat - ведьмина шляпа
+function UIFX.hw_pumpkin(dl, cx, cy, r, k, hat)
+    local V = imgui.ImVec2
+    local t = imgui.GetTime()
+    local fl = 0.85 + 0.15 * math.sin(t * 7 + cx * 0.05) * math.sin(t * 3.1 + cy * 0.1) -- мерцание свечи внутри
+    for i = 3, 1, -1 do
+        dl:AddCircleFilled(V(cx, cy), r * (1.0 + i * 0.45), col32(1.0, 0.45, 0.05, 0.04 * k * fl), 28)
+    end
+    local top = cy - r * 0.78
+    local side = col32(0.80, 0.33, 0.03, k)
+    local body = col32(1.00, 0.52, 0.08, k)
+    dl:AddCircleFilled(V(cx - r * 0.45, cy + r * 0.03), r * 0.62, side, 22)
+    dl:AddCircleFilled(V(cx + r * 0.45, cy + r * 0.03), r * 0.62, side, 22)
+    dl:AddCircleFilled(V(cx, cy), r * 0.78, body, 28)
+    dl:AddCircleFilled(V(cx - r * 0.38, cy - r * 0.38), r * 0.13, col32(1.0, 0.82, 0.55, 0.35 * k), 12)
+    -- лицо светится изнутри
+    local fc = col32(1.0, 0.88, 0.30, k * fl)
+    UIFX.hw_tri(dl, fc, cx - r * 0.55, cy - r * 0.02, cx - r * 0.18, cy - r * 0.02, cx - r * 0.36, cy - r * 0.34)
+    UIFX.hw_tri(dl, fc, cx + r * 0.18, cy - r * 0.02, cx + r * 0.55, cy - r * 0.02, cx + r * 0.36, cy - r * 0.34)
+    UIFX.hw_tri(dl, fc, cx - r * 0.08, cy + r * 0.14, cx + r * 0.08, cy + r * 0.14, cx, cy + r * 0.03)
+    dl:AddRectFilled(V(cx - r * 0.58, cy + r * 0.26), V(cx + r * 0.58, cy + r * 0.48), fc, r * 0.06)
+    for j = -2, 2, 2 do
+        local x = cx + j * r * 0.22
+        UIFX.hw_tri(dl, body, x - r * 0.09, cy + r * 0.26, x + r * 0.09, cy + r * 0.26, x, cy + r * 0.37)
+    end
+    for j = -1, 1, 2 do
+        local x = cx + j * r * 0.22
+        UIFX.hw_tri(dl, body, x - r * 0.09, cy + r * 0.48, x + r * 0.09, cy + r * 0.48, x, cy + r * 0.37)
+    end
+    if hat then
+        local hc = col32(0.22, 0.10, 0.38, k)
+        local hb = top + r * 0.12
+        UIFX.hw_tri(dl, hc, cx - r * 0.55, hb - r * 0.05, cx + r * 0.55, hb - r * 0.05, cx + r * 0.22, hb - r * 1.35)
+        dl:AddRectFilled(V(cx - r * 0.44, hb - r * 0.30), V(cx + r * 0.44, hb - r * 0.10), body, 2)
+        dl:AddRectFilled(V(cx - r * 0.95, hb - r * 0.10), V(cx + r * 0.95, hb + r * 0.08), hc, r * 0.08)
+    else
+        local sc = col32(0.30, 0.45, 0.10, k)
+        UIFX.hw_tri(dl, sc, cx - r * 0.10, top + r * 0.08, cx + r * 0.14, top + r * 0.08, cx + r * 0.20, top - r * 0.28)
+        UIFX.hw_tri(dl, sc, cx - r * 0.10, top + r * 0.08, cx + r * 0.20, top - r * 0.28, cx - r * 0.02, top - r * 0.30)
+    end
+end
+
+-- летучая мышь: x, y - центр, s - размер, fl - взмах крыльев (-1..1), k - прозрачность
+function UIFX.hw_bat(dl, x, y, s, fl, k)
+    local V = imgui.ImVec2
+    local c = col32(0.36, 0.23, 0.52, 0.90 * k)
+    local f = fl * s * 0.55
+    for d = -1, 1, 2 do
+        UIFX.hw_tri(dl, c, x, y - s * 0.15, x + d * s * 1.35, y - s * 0.45 + f, x + d * s * 0.85, y + s * 0.05)
+        UIFX.hw_tri(dl, c, x, y - s * 0.15, x + d * s * 0.85, y + s * 0.05, x + d * s * 0.45, y + s * 0.32)
+        UIFX.hw_tri(dl, c, x, y - s * 0.05, x + d * s * 0.45, y + s * 0.32, x, y + s * 0.22)
+    end
+    dl:AddCircleFilled(V(x, y + s * 0.02), s * 0.30, c, 12)
+    UIFX.hw_tri(dl, c, x - s * 0.26, y - s * 0.12, x - s * 0.06, y - s * 0.22, x - s * 0.24, y - s * 0.52)
+    UIFX.hw_tri(dl, c, x + s * 0.06, y - s * 0.22, x + s * 0.26, y - s * 0.12, x + s * 0.24, y - s * 0.52)
+    local eye = col32(1.0, 0.40, 0.10, k)
+    dl:AddCircleFilled(V(x - s * 0.11, y), s * 0.05, eye, 6)
+    dl:AddCircleFilled(V(x + s * 0.11, y), s * 0.05, eye, 6)
+end
+
+-- паутина в углу: cx, cy - угол, size - размер, dx/dy - куда расходится (±1), a - прозрачность
+function UIFX.hw_web(dl, cx, cy, size, dx, dy, a)
+    local V = imgui.ImVec2
+    local col = col32(0.85, 0.85, 1.0, a)
+    local n = 5
+    for k = 0, n do
+        local ang = (k / n) * (math.pi / 2)
+        dl:AddLine(V(cx, cy), V(cx + dx * math.cos(ang) * size, cy + dy * math.sin(ang) * size), col, 1.0)
+    end
+    for j = 1, 4 do
+        local rr = size * j / 4
+        for k = 0, n - 1 do
+            local a1, a2, am = (k / n) * (math.pi / 2), ((k + 1) / n) * (math.pi / 2), ((k + 0.5) / n) * (math.pi / 2)
+            local x1, y1 = cx + dx * math.cos(a1) * rr, cy + dy * math.sin(a1) * rr
+            local x2, y2 = cx + dx * math.cos(a2) * rr, cy + dy * math.sin(a2) * rr
+            local xm, ym = cx + dx * math.cos(am) * rr * 0.86, cy + dy * math.sin(am) * rr * 0.86
+            dl:AddLine(V(x1, y1), V(xm, ym), col, 1.0)
+            dl:AddLine(V(xm, ym), V(x2, y2), col, 1.0)
+        end
+    end
+end
+
+-- фон вкладки: луна, фиолетовое свечение, летучие мыши, паутина (рисуется под содержимым, внутри ##content)
+function UIFX.hw_bg()
+    local p, s = imgui.GetWindowPos(), imgui.GetWindowSize()
+    local dl = imgui.GetWindowDrawList()
+    local V = imgui.ImVec2
+    local t = imgui.GetTime()
+    local mx, my = p.x + s.x - 78, p.y + 70
+    for i = 5, 1, -1 do
+        dl:AddCircleFilled(V(mx, my), 40 + i * 14, col32(1.0, 0.82, 0.45, 0.012), 40)
+    end
+    dl:AddCircleFilled(V(mx, my), 40, col32(1.0, 0.90, 0.62, 0.15), 40)
+    dl:AddCircleFilled(V(mx - 12, my - 8), 9, col32(0.9, 0.7, 0.4, 0.08), 16)
+    dl:AddCircleFilled(V(mx + 14, my + 10), 6, col32(0.9, 0.7, 0.4, 0.08), 16)
+    dl:AddCircleFilled(V(mx + 6, my - 20), 5, col32(0.9, 0.7, 0.4, 0.08), 16)
+    local gx, gy = p.x + s.x * (0.30 + 0.20 * math.sin(t * 0.13)), p.y + s.y * (0.65 + 0.15 * math.cos(t * 0.10))
+    for r = 4, 1, -1 do
+        dl:AddCircleFilled(V(gx, gy), r * 60, col32(0.55, 0.20, 0.85, 0.016), 36)
+    end
+    for i = 1, 4 do
+        local span = s.x + 140
+        local bx = p.x - 70 + ((t * (22 + i * 6) + i * 173) % span)
+        local by = p.y + s.y * (0.12 + 0.17 * i) + math.sin(t * 0.8 + i * 2.0) * 16
+        UIFX.hw_bat(dl, bx, by, 10 + (i % 3) * 4, math.sin(t * 9 + i * 1.7), 0.85)
+    end
+    UIFX.hw_web(dl, p.x + s.x - 6, p.y + 6, 80, -1, 1, 0.20)
+    UIFX.hw_web(dl, p.x + s.x - 6, p.y + s.y - 6, 100, -1, -1, 0.17)
+end
+
+-- тыквы сидят на верхней рамке окна (рисуются поверх, как и сама рамка)
+function UIFX.hw_front(x0, y0, x1, y1)
+    local dl = fg_list(imgui.GetWindowDrawList)
+    UIFX.hw_pumpkin(dl, x1 - 135, y0 + 3 - 22 * 0.78, 22, 1, true)
+    UIFX.hw_pumpkin(dl, x1 - 66, y0 + 3 - 16 * 0.78, 16, 1, false)
+    UIFX.hw_pumpkin(dl, x0 + 80, y0 + 3 - 19 * 0.78, 19, 1, false)
 end
 
 local function sidebar_tab(label, id, tip)
@@ -1280,6 +1424,12 @@ local function load_settings()
         UI_CFG.shadow = (u.shadow ~= false)
         UI_CFG.bg_fx = (u.bg_fx ~= false)
         UI_CFG.splash = (u.splash ~= false)
+        if u.halloween == nil then
+            UI_CFG.halloween = true
+            UI_CFG.accent = { 0.98, 0.55, 0.12 }
+        else
+            UI_CFG.halloween = (u.halloween == true)
+        end
         if type(u.font) == "string" then UI_CFG.font = u.font end
         UI_CFG.win_w = clamp(math.floor(tonumber(u.win_w) or 835), 700, 2400)
         UI_CFG.win_h = clamp(math.floor(tonumber(u.win_h) or 500), 400, 1400)
@@ -1718,7 +1868,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "3.1"
+local SCRIPT_VERSION = "3.2"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -2000,6 +2150,7 @@ local sui = {
     shadow = imgui.new.bool(UI_CFG.shadow),
     bg_fx = imgui.new.bool(UI_CFG.bg_fx),
     splash = imgui.new.bool(UI_CFG.splash),
+    halloween = imgui.new.bool(UI_CFG.halloween),
     font_pending = false,
 }
 
@@ -2337,6 +2488,14 @@ local function draw_settings_tab()
             UI_CFG.splash = sui.splash[0]
             mark_ui_dirty()
         end
+        if imgui.Checkbox("Хэллоуин: тыквы, летучие мыши, паутина##halloween", sui.halloween) then
+            UI_CFG.halloween = sui.halloween[0]
+            local c = UI_CFG.halloween and { 0.98, 0.55, 0.12 } or { 0.18, 0.45, 0.85 }
+            UI_CFG.accent = c
+            sui.accent[0], sui.accent[1], sui.accent[2] = c[1], c[2], c[3]
+            apply_theme()
+            mark_ui_dirty()
+        end
 
         sub_title("FONT", "Шрифт")
         local font_name = FONT_AVAILABLE[1].name
@@ -2374,7 +2533,7 @@ local function draw_settings_tab()
         imgui.TextDisabled("Касается надписей PayDay и часов, которые показываются поверх игры.")
         imgui.Spacing()
         if imgui.Button(ic("ROTATE_LEFT", "") .. " Сбросить внешний вид##reset_look", imgui.ImVec2(230, 28)) then
-            UI_CFG.accent = { 0.18, 0.45, 0.85 }
+            UI_CFG.accent = UI_CFG.halloween and { 0.98, 0.55, 0.12 } or { 0.18, 0.45, 0.85 }
             UI_CFG.opacity = 1.0
             UI_CFG.overlay_scale = 1.0
             UI_CFG.border_mode = 1
@@ -2384,7 +2543,7 @@ local function draw_settings_tab()
                 UI_CFG.font = "seguisb"
                 sui.font_pending = true
             end
-            sui.accent[0], sui.accent[1], sui.accent[2] = 0.18, 0.45, 0.85
+            sui.accent[0], sui.accent[1], sui.accent[2] = UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3]
             sui.opacity[0] = 1.0
             sui.scale[0] = 1.0
             sui.border_speed[0] = 1.0
@@ -2614,6 +2773,7 @@ function UIFX.draw_splash(wpos)
     for i = 5, 1, -1 do
         dl:AddCircleFilled(V(cx, cy), 40 + i * 26, col32(ac[1], ac[2], ac[3], 0.035 * a), 40)
     end
+    if UI_CFG.halloween then UIFX.hw_safe(UIFX.hw_pumpkin, dl, cx, cy - 92, 30, a, true) end
     local grow = 1 + 0.12 * (1 - clamp(el / 0.7, 0, 1)) ^ 2
     local title = "Arizona Prices"
     imgui.SetWindowFontScale(2.6 * grow)
@@ -2629,6 +2789,12 @@ function UIFX.draw_splash(wpos)
     local bx, by = cx - bw / 2, cy + ts.y / 2 + 62
     dl:AddRectFilled(V(bx, by), V(bx + bw, by + 6), col32(1, 1, 1, 0.10 * a), 3)
     dl:AddRectFilled(V(bx, by), V(bx + bw * clamp(el / (dur - 0.3), 0, 1), by + 6), col32(ac[1], ac[2], ac[3], a), 3)
+    if UI_CFG.halloween then
+        imgui.SetWindowFontScale(1.1)
+        local hs = imgui.CalcTextSize("Happy Halloween")
+        dl:AddText(V(cx - hs.x / 2, by + 20), col32(1.0, 0.60, 0.15, a), "Happy Halloween")
+        imgui.SetWindowFontScale(1.0)
+    end
 end
 
 imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha > 0 end,
@@ -2682,6 +2848,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 local content_visible = imgui.BeginChild("##content", imgui.ImVec2(LAYOUT.w - SIDEBAR_W - slide, LAYOUT.h), false, content_flags)
                 if content_visible then
                 if UI_CFG.bg_fx then pcall(UIFX.draw_bg) end
+                if UI_CFG.halloween then UIFX.hw_safe(UIFX.hw_bg) end
                 if current_tab == 1 then
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
