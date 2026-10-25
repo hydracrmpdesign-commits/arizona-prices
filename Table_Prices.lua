@@ -1529,7 +1529,7 @@ clock_frame = imgui.OnFrame(
 )
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "2.2"
+local SCRIPT_VERSION = "2.3"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1798,7 +1798,108 @@ local function flush_ui_save(force)
     end
 end
 
+-- ===================== Окно авторизации (код из телеграм-канала) =====================
+-- ВАЖНО: чтобы сменить код, поменяй ACCESS_CODE и выложи новую версию скрипта.
+-- Все данные окна лежат в одной таблице AUTH, чтобы не тратить локальные переменные.
+local AUTH = {
+    ACCESS_CODE = "PRICES2026",
+    path = getWorkingDirectory() .. "\\config\\arizona_prices_auth.json",
+    open = imgui.new.bool(false),
+    nick = imgui.new.char[48](),
+    code = imgui.new.char[48](),
+    error = "",
+    ok = false,
+}
+
+-- уже входил с этим кодом раньше?
+do
+    local d = safe_read_json(AUTH.path)
+    if type(d) == "table" and tostring(d.code or ""):lower() == AUTH.ACCESS_CODE:lower() then
+        AUTH.ok = true
+    end
+end
+
+function AUTH.try_login()
+    local nick = ffi.string(AUTH.nick):gsub("^%s+", ""):gsub("%s+$", "")
+    local code = ffi.string(AUTH.code):gsub("%s", "")
+    if nick == "" then AUTH.error = "Введите ваш никнейм"; return end
+    if code == "" then AUTH.error = "Введите код из телеграм-канала"; return end
+    if code:lower() ~= AUTH.ACCESS_CODE:lower() then AUTH.error = "Неверный код. Получите актуальный код в телеграм-канале"; return end
+    AUTH.ok = true
+    AUTH.error = ""
+    AUTH.open[0] = false
+    local dir = getWorkingDirectory() .. "\\config"
+    if not doesDirectoryExist(dir) then createDirectory(dir) end
+    write_file_raw(AUTH.path, encodeJson({ nick = nick, code = code }))
+    notify("Доступ открыт. Добро пожаловать, " .. nick .. "!", "ok", 5)
+    main_window[0] = true
+end
+
+imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
+    local sw, sh = getScreenResolution()
+    local W, H = 560, 380
+    imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
+    imgui.SetNextWindowSize(imgui.ImVec2(W, H), imgui.Cond.Always)
+    imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.075, 0.07, 0.095, 1.0))
+    imgui.Begin("##auth_window", nil, bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoResize,
+        imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings))
+    local p = imgui.GetWindowPos()
+    local ac = UI_CFG.accent
+    imgui.GetWindowDrawList():AddRectFilled(p, imgui.ImVec2(p.x + W, p.y + 5), col32(ac[1], ac[2], ac[3], 1))
+
+    imgui.SetCursorPos(imgui.ImVec2(26, 24))
+    imgui.SetWindowFontScale(1.7)
+    imgui.TextColored(accent_vec(1.2), ic("LOCK", "") .. " Авторизация")
+    imgui.SetWindowFontScale(1.15)
+    imgui.SetCursorPos(imgui.ImVec2(26, 76))
+    imgui.PushTextWrapPos(W - 26)
+    imgui.TextWrapped("Вы попали в окно авторизации. Введите свой никнейм и код. Код можно получить в телеграм-канале.")
+    imgui.PopTextWrapPos()
+
+    imgui.SetCursorPos(imgui.ImVec2(26, 150))
+    imgui.SetNextItemWidth(W - 52)
+    imgui.InputTextWithHint("##auth_nick", "Ваш никнейм", AUTH.nick, ffi.sizeof(AUTH.nick))
+    imgui.SetCursorPosX(26)
+    imgui.SetNextItemWidth(W - 52)
+    local enter = imgui.InputTextWithHint("##auth_code", "Код из телеграм-канала", AUTH.code, ffi.sizeof(AUTH.code), imgui.InputTextFlags.EnterReturnsTrue)
+    if enter then AUTH.try_login() end
+
+    imgui.SetCursorPosX(26)
+    if AUTH.error ~= "" then
+        imgui.TextColored(imgui.ImVec4(1.0, 0.4, 0.4, 1.0), AUTH.error)
+    else
+        imgui.Text(" ")
+    end
+
+    imgui.SetCursorPos(imgui.ImVec2(26, H - 26 - 46))
+    local bw = (W - 52 - 20) / 3
+    imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
+    imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.15))
+    imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(0.85))
+    if imgui.Button(ic("RIGHT_TO_BRACKET", "") .. " Войти##auth_go", imgui.ImVec2(bw, 46)) then AUTH.try_login() end
+    imgui.PopStyleColor(3)
+    imgui.SameLine()
+    if imgui.Button(ic("PAPER_PLANE", "") .. " Получить код##auth_tg", imgui.ImVec2(bw + 40, 46)) then
+        open_url("https://t.me/arizona_prices")
+    end
+    imgui.SameLine()
+    if imgui.Button(FA.CIRCLE_XMARK .. " Закрыть##auth_close", imgui.ImVec2(bw - 40, 46)) then AUTH.open[0] = false end
+    imgui.SetWindowFontScale(1.0)
+    imgui.End()
+    imgui.PopStyleColor(1)
+end, function() AUTH.open[0] = false end))
+
 local function toggle_menu()
+    if not AUTH.ok then
+        -- нет доступа: показываем окно авторизации вместо меню
+        main_window[0] = false
+        AUTH.open[0] = not AUTH.open[0]
+        if AUTH.open[0] and ffi.string(AUTH.nick) == "" then
+            local okn, id = pcall(function() local _, i = sampGetPlayerIdByCharHandle(PLAYER_PED); return sampGetPlayerNickname(i) end)
+            if okn and id then imgui.StrCopy(AUTH.nick, id) end
+        end
+        return
+    end
     main_window[0] = not main_window[0]
     if main_window[0] and update_info.available then
         outdated_popup[0] = true
