@@ -2,7 +2,6 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "3.3" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -321,7 +320,7 @@ local UIFX = {
     table_t = -10,    -- момент начала каскадной анимации строк таблицы
     was_open = false,
     splashed = false, -- заставка уже показана в этой игровой сессии
-    TAB_ORDER = { 1, 2, 3, 4, 8, 6, 5, 7 }, -- порядок вкладок слева (цифры 1-8 на клавиатуре)
+    TAB_ORDER = { 1, 2, 3, 5, 7 }, -- порядок вкладок слева (цифры 1-5 на клавиатуре)
 }
 
 -- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
@@ -561,8 +560,8 @@ end
 
 -- ===================== Левая панель и калькулятор =====================
 local SIDEBAR_W = 200
-local LAYOUT = { w = 835, h = 500, tab_h = 42, block_y = 340, force = false } -- текущие размеры главного окна
-local current_tab = 1 -- 1 = Arizona Prices, 2 = Калькулятор, 3 = Отчет до PayDay, 4 = Фразы, 5 = О скрипте, 6 = Время стран
+local LAYOUT = { w = 835, h = 500, tab_h = 46, block_y = 266, force = false } -- текущие размеры главного окна
+local current_tab = 1 -- 1 = Arizona Prices, 2 = Калькулятор, 3 = Отчет до PayDay, 5 = О скрипте, 7 = Настройки
 
 local calc_expr = ""
 local calc_prev = ""
@@ -1450,9 +1449,7 @@ end
 
 safe_call("load_settings", load_settings)
 
--- избранные предметы и заметки
-UIFX.notes = imgui.new.char[8192]()
-imgui.StrCopy(UIFX.notes, settings.notes or "")
+-- избранные предметы
 
 function UIFX.toggle_fav(name)
     if settings.favs[name] then settings.favs[name] = nil else settings.favs[name] = true end
@@ -1462,7 +1459,6 @@ end
 local payday_on = imgui.new.bool(settings.payday.enabled)
 local payday_edit = false
 local payday_pos = { x = settings.payday.x, y = settings.payday.y }
-local phrase_buf = imgui.new.char[256]()
 
 local function minutes_to_payday()
     local m = tonumber(os.date("%M")) or 0
@@ -1536,51 +1532,6 @@ local function draw_payday_tab()
     imgui.EndChild()
 end
 
-local function draw_phrases_tab()
-    section_header(ic("COMMENT_DOTS", ""), "Фразы для автоотправки")
-    imgui.SetWindowFontScale(1.3)
-    imgui.SetNextItemWidth(imgui.GetContentRegionAvail().x - 190)
-    local enter = imgui.InputTextWithHint("##phrase_input", "Введи фразу или команду (например /time)", phrase_buf, ffi.sizeof(phrase_buf), imgui.InputTextFlags.EnterReturnsTrue)
-    imgui.SameLine()
-    local add_clicked = imgui.Button(FA.CIRCLE_PLUS .. " Добавить##add_phrase", imgui.ImVec2(180, 0))
-    if enter or add_clicked then
-        local text = ffi.string(phrase_buf)
-        if text:gsub("%s", "") ~= "" then
-            table.insert(settings.phrases, text)
-            save_settings()
-            imgui.StrCopy(phrase_buf, "")
-        end
-    end
-    imgui.Spacing()
-    if imgui.BeginChild("##phrases_list", imgui.ImVec2(-1, -36), true) then
-        if #settings.phrases == 0 then
-            imgui.TextDisabled("Пока нет фраз. Добавь первую выше.")
-        end
-        local to_remove = nil
-        for i, phrase in ipairs(settings.phrases) do
-            if imgui.Button(FA.PAPER_PLANE .. "##send_phrase_" .. i, imgui.ImVec2(52, 40)) then
-                local txt = phrase
-                defer(function() sampSendChat(u8:decode(txt)) end)
-            end
-            if imgui.IsItemHovered() then imgui.SetTooltip("Отправить в чат") end
-            imgui.SameLine()
-            if imgui.Button(FA.TRASH_CAN .. "##del_phrase_" .. i, imgui.ImVec2(52, 40)) then
-                to_remove = i
-            end
-            if imgui.IsItemHovered() then imgui.SetTooltip("Удалить фразу") end
-            imgui.SameLine()
-            imgui.AlignTextToFramePadding()
-            imgui.TextUnformatted(phrase)
-        end
-        if to_remove then
-            table.remove(settings.phrases, to_remove)
-            save_settings()
-        end
-    end
-    imgui.EndChild()
-    imgui.SetWindowFontScale(1.0)
-end
-
 local about_links = {
     { icon = "PAPER_PLANE", title = "Telegram-канал",              url = "https://t.me/arizona_prices",                 color = {0.16, 0.62, 0.86} },
     { icon = "COMMENTS",    title = "Discord-канал",               url = "https://discord.gg/z4UmCnRwd",                color = {0.35, 0.40, 0.95} },
@@ -1627,249 +1578,14 @@ local function draw_about_tab()
     imgui.EndChild()
 end
 
--- ===================== Время стран =====================
-local function days_from_civil(y, m, d)
-    if m <= 2 then y = y - 1 end
-    local era = math.floor(y / 400)
-    local yoe = y - era * 400
-    local mp = (m + 9) % 12
-    local doy = math.floor((153 * mp + 2) / 5) + d - 1
-    local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
-    return era * 146097 + doe - 719468
-end
-
-local function utc_epoch(y, m, d, h)
-    return days_from_civil(y, m, d) * 86400 + h * 3600
-end
-
-local function weekday_of(y, m, d) -- 0 = воскресенье
-    return (days_from_civil(y, m, d) + 4) % 7
-end
-
-local function nth_sunday(y, m, n)
-    local first = 1 + (7 - weekday_of(y, m, 1)) % 7
-    return first + (n - 1) * 7
-end
-
-local function last_sunday(y, m)
-    local dim = ({31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31})[m]
-    return dim - weekday_of(y, m, dim)
-end
-
-local function is_dst(rule, std_offset, now)
-    local y = tonumber(os.date("!%Y", now))
-    if rule == "eu" then
-        local s = utc_epoch(y, 3, last_sunday(y, 3), 1)
-        local e = utc_epoch(y, 10, last_sunday(y, 10), 1)
-        return now >= s and now < e
-    elseif rule == "us" then
-        local s = utc_epoch(y, 3, nth_sunday(y, 3, 2), 2) - std_offset * 3600
-        local e = utc_epoch(y, 11, nth_sunday(y, 11, 1), 2) - (std_offset + 1) * 3600
-        return now >= s and now < e
-    end
-    return false
-end
-
-local function local_pc_offset()
-    local now = os.time()
-    local l = os.date("*t", now)
-    local u = os.date("!*t", now)
-    u.isdst = l.isdst
-    return os.difftime(os.time(l), os.time(u)) / 3600
-end
-
-local countries = {
-    { name = "Азербайджан", off = 4 },
-    { name = "Армения", off = 4 },
-    { name = "Беларусь", off = 3 },
-    { name = "Великобритания", off = 0, dst = "eu" },
-    { name = "Германия", off = 1, dst = "eu" },
-    { name = "Грузия", off = 4 },
-    { name = "Индия", off = 5.5 },
-    { name = "Казахстан", off = 5 },
-    { name = "Китай", off = 8 },
-    { name = "Кыргызстан", off = 6 },
-    { name = "Москва (время Аризоны)", off = 3 },
-    { name = "ОАЭ", off = 4 },
-    { name = "Польша", off = 1, dst = "eu" },
-    { name = "Россия, Владивосток", off = 10 },
-    { name = "Россия, Екатеринбург", off = 5 },
-    { name = "Россия, Новосибирск", off = 7 },
-    { name = "США, Лос-Анджелес", off = -8, dst = "us" },
-    { name = "США, Нью-Йорк", off = -5, dst = "us" },
-    { name = "Таджикистан", off = 5 },
-    { name = "Таиланд", off = 7 },
-    { name = "Турция", off = 3 },
-    { name = "Узбекистан", off = 5 },
-    { name = "Украина", off = 2, dst = "eu" },
-    { name = "Япония", off = 9 },
-}
-
-local selected_country = 1
-for i, c in ipairs(countries) do
-    if c.name == "Узбекистан" then selected_country = i end
-end
-
-local function country_time(c)
-    local now = os.time()
-    local off
-    if c.pc then
-        off = local_pc_offset()
-    else
-        off = c.off
-        if c.dst and is_dst(c.dst, c.off, now) then off = off + 1 end
-    end
-    local shifted = now + off * 3600
-    return os.date("!%H:%M:%S", shifted), os.date("!%d.%m.%Y", shifted)
-end
-
 local function shadow_text(color, text)
     local p = imgui.GetCursorScreenPos()
     imgui.GetWindowDrawList():AddText(imgui.ImVec2(p.x + 1, p.y + 1), 0xFF000000, text)
     imgui.TextColored(color, text)
 end
 
-local clock_edit = false
-local clock_pos = { x = settings.clock.x, y = settings.clock.y }
-local pending_clock_open = false
-local pending_clock_index = nil
-local CLOCK_MODAL_ID = "Время на экране###clock_modal"
-
-local function find_country(name)
-    for _, c in ipairs(countries) do
-        if c.name == name then return c end
-    end
-    return countries[1]
-end
-
-local function draw_time_tab()
-    section_header(ic("GLOBE", ""), "Время стран")
-    if imgui.BeginChild("##time_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
-        local sel = countries[selected_country]
-        local tm, dt = country_time(sel)
-        local width = imgui.GetWindowWidth()
-
-        imgui.SetWindowFontScale(2.4)
-        local ts = imgui.CalcTextSize(tm)
-        imgui.SetCursorPosX(math.max(5, (width - ts.x) / 2))
-        imgui.TextColored(imgui.ImVec4(1.00, 0.85, 0.30, 1.00), tm)
-        imgui.SetWindowFontScale(1.0)
-
-        local label = sel.name .. "  |  " .. dt
-        local ls = imgui.CalcTextSize(label)
-        imgui.SetCursorPosX(math.max(5, (width - ls.x) / 2))
-        imgui.Text(label)
-        imgui.Spacing()
-        imgui.Separator()
-        imgui.Spacing()
-
-        if settings.clock.enabled then
-            imgui.AlignTextToFramePadding()
-            imgui.Text("На экране: " .. settings.clock.country)
-            imgui.SameLine()
-            if not clock_edit then
-                if imgui.Button("Передвинуть##clock_move") then clock_edit = true end
-            else
-                if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение##clock_save") then
-                    settings.clock.x = clock_pos.x
-                    settings.clock.y = clock_pos.y
-                    save_settings()
-                    clock_edit = false
-                end
-            end
-            imgui.SameLine()
-            if imgui.Button("Убрать с экрана##clock_hide") then
-                settings.clock.enabled = false
-                clock_edit = false
-                save_settings()
-            end
-            if clock_edit then
-                imgui.TextColored(imgui.ImVec4(0.45, 1.00, 0.55, 1.00), "Перетащи надпись мышкой, затем нажми «Сохранить положение».")
-            end
-            imgui.Spacing()
-            imgui.Separator()
-            imgui.Spacing()
-        end
-
-        if imgui.BeginChild("##time_list", imgui.ImVec2(-1, -1), false) then
-            local bw = math.floor((imgui.GetContentRegionAvail().x - 10 - 16) / 3)
-            for i, c in ipairs(countries) do
-                if (i - 1) % 3 ~= 0 then imgui.SameLine() end
-                local ctm = country_time(c)
-                local active = (i == selected_country)
-                if active then
-                    imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
-                end
-                if imgui.Button(c.name .. "\n" .. ctm .. "###country_" .. i, imgui.ImVec2(bw, 44)) then
-                    selected_country = i
-                    pending_clock_index = i
-                    pending_clock_open = true
-                    local ntm, ndt = country_time(c)
-                    local chat_msg = u8:decode("{33AAFF}[Arizona Prices] {FFFFFF}Время (" .. c.name .. "): {33AAFF}" .. ntm .. " {FFFFFF}(" .. ndt .. ")")
-                    defer(function() sampAddChatMessage(chat_msg, -1) end)
-                end
-                if active then imgui.PopStyleColor(1) end
-            end
-        end
-        imgui.EndChild()
-
-        if pending_clock_open then
-            imgui.OpenPopup(CLOCK_MODAL_ID)
-            pending_clock_open = false
-        end
-        local sw, sh = getScreenResolution()
-        imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
-        imgui.SetNextWindowSize(imgui.ImVec2(400, 135), imgui.Cond.Always)
-        if imgui.BeginPopupModal(CLOCK_MODAL_ID, nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize)) then
-            local pc = countries[pending_clock_index or selected_country]
-            imgui.TextColored(imgui.ImVec4(1.00, 0.85, 0.30, 1.00), pc.name)
-            imgui.TextWrapped("Показывать время этой страны на экране?")
-            imgui.Spacing()
-            local half = (imgui.GetContentRegionAvail().x - 5) / 2
-            if imgui.Button(ic("CIRCLE_CHECK", "") .. " Да##clock_yes", imgui.ImVec2(half, 34)) then
-                settings.clock.enabled = true
-                settings.clock.country = pc.name
-                save_settings()
-                imgui.CloseCurrentPopup()
-            end
-            imgui.SameLine()
-            if imgui.Button(FA.CIRCLE_XMARK .. " Нет##clock_no", imgui.ImVec2(half, 34)) then
-                imgui.CloseCurrentPopup()
-            end
-            imgui.EndPopup()
-        end
-    end
-    imgui.EndChild()
-end
-
-local clock_frame
-clock_frame = imgui.OnFrame(
-    function()
-        clock_frame.HideCursor = not clock_edit
-        return settings.clock.enabled
-    end,
-    guard_frame("clock", function()
-        if clock_edit and not main_window[0] then clock_edit = false end
-        local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.AlwaysAutoResize, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
-        if not clock_edit then
-            flags = bit.bor(flags, imgui.WindowFlags.NoMove, imgui.WindowFlags.NoInputs, imgui.WindowFlags.NoBackground)
-            imgui.SetNextWindowPos(imgui.ImVec2(clock_pos.x, clock_pos.y), imgui.Cond.Always)
-        end
-        imgui.SetNextWindowBgAlpha(0.45)
-        imgui.Begin("##clock_overlay", nil, flags)
-        imgui.SetWindowFontScale(UI_CFG.overlay_scale)
-        local c = find_country(settings.clock.country)
-        shadow_text(imgui.ImVec4(0.55, 0.85, 1.00, 1.00), c.name .. ": " .. country_time(c))
-        if clock_edit then
-            local pos = imgui.GetWindowPos()
-            clock_pos.x, clock_pos.y = pos.x, pos.y
-        end
-        imgui.End()
-    end, function() settings.clock.enabled = false end)
-)
-
 -- ===================== Автообновление (скрипт и цены) =====================
--- (версия задана в начале файла: SCRIPT_VERSION)
+local SCRIPT_VERSION = "3.3"
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1987,7 +1703,7 @@ local function handle_script()
         update_info.status = "Ошибка загрузки"
         return
     end
-    if not loadstring(c) then
+    if not loadstring(c) or not c:find("SCRIPT_VERSION", 1, true) then
         update_info.status = "Файл повреждён"
         return
     end
@@ -2344,11 +2060,11 @@ local function on_window_message(msg, wparam, lparam)
 
     if is_repeat then return end
 
-    -- горячие клавиши внутри открытого меню: цифры 1-8 переключают вкладки, Ctrl+F - поиск по таблице
+    -- горячие клавиши внутри открытого меню: цифры 1-5 переключают вкладки, Ctrl+F - поиск по таблице
     if main_window[0] and UIFX.alpha > 0.5 and not hk.typing then
         local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
         if not (okc and busy) then
-            if wparam >= 0x31 and wparam <= 0x38 then
+            if wparam >= 0x31 and wparam <= 0x35 then
                 UIFX.pending_tab = UIFX.TAB_ORDER[wparam - 0x30]
                 consumeWindowMessage(true, true)
                 return
@@ -2602,44 +2318,13 @@ local function draw_settings_tab()
     imgui.EndChild()
 end
 
-local function draw_notes_tab()
-    section_header(ic("NOTE_STICKY", ""), "Заметки")
-    if imgui.BeginChild("##notes_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
-        imgui.TextDisabled("Записывай сюда всё важное: цены, договорённости, ники. Сохраняется само.")
-        imgui.Spacing()
-        imgui.SetWindowFontScale(1.15)
-        local h = imgui.GetContentRegionAvail().y - 48
-        if imgui.InputTextMultiline("##notes_text", UIFX.notes, ffi.sizeof(UIFX.notes), imgui.ImVec2(-1, math.max(80, h))) then
-            settings.notes = ffi.string(UIFX.notes)
-            mark_ui_dirty()
-        end
-        imgui.SetWindowFontScale(1.0)
-        local used = math.floor(#settings.notes / 81.91)
-        imgui.AlignTextToFramePadding()
-        imgui.TextDisabled("Заполнено: " .. used .. "%")
-        imgui.SameLine()
-        if imgui.Button(ic("TRASH_CAN", "") .. " Очистить##notes_clear", imgui.ImVec2(130, 28)) then
-            imgui.StrCopy(UIFX.notes, "")
-            settings.notes = ""
-            mark_ui_dirty()
-        end
-    end
-    imgui.EndChild()
-end
-
 local function draw_extra_tab(id)
     if id == 3 then
         draw_payday_tab()
-    elseif id == 4 then
-        draw_phrases_tab()
     elseif id == 5 then
         draw_about_tab()
-    elseif id == 6 then
-        draw_time_tab()
     elseif id == 7 then
         draw_settings_tab()
-    elseif id == 8 then
-        draw_notes_tab()
     end
 end
 
@@ -2741,8 +2426,8 @@ local function layout_update(wsz)
         imgui.SetWindowSize(wsz, imgui.Cond.Always)
     end
     LAYOUT.w, LAYOUT.h = wsz.x, wsz.y
-    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 8) - 5, 26, 42)
-    LAYOUT.block_y = 5 + 8 * (LAYOUT.tab_h + 5) + 6
+    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 5) - 5, 26, 46)
+    LAYOUT.block_y = 5 + 5 * (LAYOUT.tab_h + 5) + 6
     local w, h = math.floor(wsz.x + 0.5), math.floor(wsz.y + 0.5)
     if w ~= UI_CFG.win_w or h ~= UI_CFG.win_h then
         UI_CFG.win_w, UI_CFG.win_h = w, h
@@ -2827,11 +2512,8 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1, "Таблица цен предметов (клавиша 1)\nCtrl+F - быстрый поиск")
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
                 sidebar_tab(ic("CLOCK", "") .. " Отчет до PayDay", 3, "Таймер до PayDay на экране (клавиша 3)")
-                sidebar_tab(ic("COMMENT_DOTS", "") .. " Фразы", 4, "Быстрые фразы в чат (клавиша 4)")
-                sidebar_tab(ic("NOTE_STICKY", "") .. " Заметки", 8, "Ваши заметки (клавиша 5)")
-                sidebar_tab(ic("GLOBE", "") .. " Время стран", 6, "Время в других странах (клавиша 6)")
-                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 7)")
-                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 8)")
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 4)")
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 5)")
                 UIFX.draw_bar(wpos)
                 draw_update_block()
 
