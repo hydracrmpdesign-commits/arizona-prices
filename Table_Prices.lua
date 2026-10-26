@@ -2,6 +2,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
+local SCRIPT_VERSION = "3.4" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -1585,7 +1586,7 @@ local function shadow_text(color, text)
 end
 
 -- ===================== Автообновление (скрипт и цены) =====================
-local SCRIPT_VERSION = "3.3"
+-- (версия задана в начале файла: SCRIPT_VERSION)
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
@@ -1703,7 +1704,7 @@ local function handle_script()
         update_info.status = "Ошибка загрузки"
         return
     end
-    if not loadstring(c) or not c:find("SCRIPT_VERSION", 1, true) then
+    if not loadstring(c) then
         update_info.status = "Файл повреждён"
         return
     end
