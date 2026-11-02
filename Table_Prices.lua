@@ -2,7 +2,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "3.7" -- Метка для старых версий
+local SCRIPT_VERSION = "4.1" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -321,7 +321,7 @@ local UIFX = {
     table_t = -10,    -- момент начала каскадной анимации строк таблицы
     was_open = false,
     splashed = false, -- заставка уже показана в этой игровой сессии
-    TAB_ORDER = { 1, 2, 3, 4, 5, 7 }, -- порядок вкладок слева (цифры 1-6 на клавиатуре)
+    TAB_ORDER = { 1, 2, 4, 5, 7 }, -- порядок вкладок слева (цифры 1-5 на клавиатуре)
 }
 
 -- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
@@ -562,7 +562,7 @@ end
 -- ===================== Левая панель и калькулятор =====================
 local SIDEBAR_W = 200
 local LAYOUT = { w = 835, h = 500, tab_h = 46, block_y = 266, force = false } -- текущие размеры главного окна
-local current_tab = 1 -- 1 = Arizona Prices, 2 = Калькулятор, 3 = Отчет до PayDay, 4 = Коллекционные сеты, 5 = О скрипте, 7 = Настройки
+local current_tab = 1 -- 1 = Arizona Prices, 2 = Калькулятор, 4 = Коллекционные сеты, 5 = О скрипте, 7 = Настройки
 
 local calc_expr = ""
 local calc_prev = ""
@@ -1377,18 +1377,13 @@ local function draw_calculator()
     end
 end
 
--- ===================== Новые разделы: PayDay, фразы, о скрипте =====================
+-- ===================== Новые разделы: фразы, о скрипте =====================
 local settings_path = getWorkingDirectory() .. "\\config\\arizona_prices_settings.json"
-local settings = { ui = UI_CFG, favs = {}, notes = "", payday = { enabled = false, x = 20, y = 300 }, phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
+local settings = { ui = UI_CFG, favs = {}, notes = "", phrases = {}, clock = { enabled = false, country = "Узбекистан", x = 20, y = 340 } }
 
 local function load_settings()
     local data = safe_read_json(settings_path)
     if not data then return end
-    if type(data.payday) == "table" then
-        settings.payday.enabled = (data.payday.enabled == true)
-        settings.payday.x = tonumber(data.payday.x) or 20
-        settings.payday.y = tonumber(data.payday.y) or 300
-    end
     if type(data.phrases) == "table" then
         local ph = {}
         for _, v in ipairs(data.phrases) do
@@ -1457,30 +1452,6 @@ function UIFX.toggle_fav(name)
     save_settings()
 end
 
-local payday_on = imgui.new.bool(settings.payday.enabled)
-local payday_edit = false
-local payday_pos = { x = settings.payday.x, y = settings.payday.y }
-
-local function minutes_to_payday()
-    local m = tonumber(os.date("%M")) or 0
-    if m < 30 then return 30 - m end
-    return 60 - m
-end
-
-local function payday_text()
-    local d = os.date("*t")
-    local left = 1800 - ((d.min % 30) * 60 + d.sec)
-    return "До PayDay: " .. math.floor(left / 60) .. " мин " .. string.format("%02d", left % 60) .. " сек"
-end
-
-local function minutes_word(n)
-    local n10, n100 = n % 10, n % 100
-    if n100 >= 11 and n100 <= 14 then return "минут" end
-    if n10 == 1 then return "минута" end
-    if n10 >= 2 and n10 <= 4 then return "минуты" end
-    return "минут"
-end
-
 local function section_header(icon, title)
     imgui.AlignTextToFramePadding()
     imgui.SetCursorPosX(9)
@@ -1495,43 +1466,6 @@ local function section_header(icon, title)
     imgui.Spacing()
 end
 
-local function draw_payday_tab()
-    section_header(ic("CLOCK", ""), "Отчет до PayDay")
-    if imgui.BeginChild("##payday_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
-        imgui.SetWindowFontScale(1.35)
-        imgui.TextWrapped("На экране появится надпись «До PayDay: N мин N сек». PayDay выплачивается каждые 30 минут: в :00 и :30.")
-        imgui.Spacing()
-        if imgui.Checkbox(" Включить", payday_on) then
-            settings.payday.enabled = payday_on[0]
-            save_settings()
-        end
-        imgui.Spacing()
-        imgui.Separator()
-        imgui.Spacing()
-        imgui.Text("Положение надписи на экране:")
-        imgui.Spacing()
-        if not payday_edit then
-            if imgui.Button(ic("UP_DOWN_LEFT_RIGHT", "") .. " Передвинуть надпись", imgui.ImVec2(360, 56)) then
-                payday_edit = true
-                payday_on[0] = true
-            end
-        else
-            imgui.TextColored(imgui.ImVec4(0.45, 1.00, 0.55, 1.00), "Перетащи надпись мышкой, затем нажми «Сохранить».")
-            if imgui.Button(FA.FLOPPY_DISK .. " Сохранить положение", imgui.ImVec2(360, 56)) then
-                settings.payday.x = payday_pos.x
-                settings.payday.y = payday_pos.y
-                settings.payday.enabled = payday_on[0]
-                save_settings()
-                payday_edit = false
-                notify("Положение надписи сохранено", "ok")
-            end
-        end
-        imgui.Spacing()
-        imgui.TextDisabled("Сейчас: " .. payday_text())
-        imgui.SetWindowFontScale(1.0)
-    end
-    imgui.EndChild()
-end
 
 local about_links = {
     { icon = "PAPER_PLANE", logo = "tg", title = "Telegram-канал",              sub = "Актуальные цены и новости",    url = "https://t.me/arizona_prices",                 color = {0.16, 0.62, 0.86} },
@@ -1763,17 +1697,16 @@ local function draw_about_tab()
     imgui.EndChild()
 end
 
-local function shadow_text(color, text)
-    local p = imgui.GetCursorScreenPos()
-    imgui.GetWindowDrawList():AddText(imgui.ImVec2(p.x + 1, p.y + 1), 0xFF000000, text)
-    imgui.TextColored(color, text)
-end
 
 -- ===================== Автообновление (скрипт и цены) =====================
 -- (версия задана в начале файла: SCRIPT_VERSION)
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
+local cache_dir = cfg_dir .. "arizona_prices_cache\\"  -- картинки интерфейса: их можно удалить, скрипт пересоздаст
+local function ensure_cache()
+    if not doesDirectoryExist(cache_dir) then createDirectory(cache_dir) end
+end
 local state_path = cfg_dir .. "arizona_prices_state.json"
 local state = { prices_sig = "", auto_prices = true }
 function UIFX.get_auto() return state.auto_prices ~= false end
@@ -1855,8 +1788,18 @@ local function fetch(name, dest, flag)
     return ok
 end
 
+-- удаляет картинки, которые старые версии клали прямо в config, и временные файлы обновления
+local junk_cleared = false
+local function clear_junk()
+    local names = { "arizona_logo.jpg", "arizona_prices_update.lua", "arizona_prices_remote_version.txt", "arizona_prices_remote.json" }
+    for _, sx in ipairs(UIFX.SETS or {}) do names[#names + 1] = "arizona_set_" .. sx.key .. ".jpg" end
+    for key in pairs(UIFX.ICONS or {}) do names[#names + 1] = "arizona_icon_" .. key .. ".png" end
+    for _, n in ipairs(names) do os.remove(cfg_dir .. n) end
+end
+
 local function start_checks()
     if not doesDirectoryExist(cfg_dir) then createDirectory(cfg_dir) end
+    if not junk_cleared then junk_cleared = true; pcall(clear_junk) end
     fetch("version.txt", cfg_dir .. "arizona_prices_remote_version.txt", "version")
     if state.auto_prices then
         fetch("item_prices.json", cfg_dir .. "arizona_prices_remote.json", "prices")
@@ -2246,11 +2189,11 @@ local function on_window_message(msg, wparam, lparam)
 
     if is_repeat then return end
 
-    -- горячие клавиши внутри открытого меню: цифры 1-6 переключают вкладки, Ctrl+F - поиск по таблице
+    -- горячие клавиши внутри открытого меню: цифры 1-5 переключают вкладки, Ctrl+F - поиск по таблице
     if main_window[0] and UIFX.alpha > 0.5 and not hk.typing then
         local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
         if not (okc and busy) then
-            if wparam >= 0x31 and wparam <= 0x36 then
+            if wparam >= 0x31 and wparam <= 0x35 then
                 UIFX.pending_tab = UIFX.TAB_ORDER[wparam - 0x30]
                 consumeWindowMessage(true, true)
                 return
@@ -2427,13 +2370,6 @@ local function draw_settings_tab()
             imgui.TextDisabled("Шрифт меняется после перезапуска скрипта. Берётся из папки Fonts в Windows.")
         end
 
-        sub_title("EXPAND", "Надписи на экране")
-        imgui.SetNextItemWidth(260)
-        if imgui.SliderFloat("Размер надписей на экране##overlay_scale", sui.scale, 0.7, 2.0, "%.1f") then
-            UI_CFG.overlay_scale = sui.scale[0]
-            mark_ui_dirty()
-        end
-        imgui.TextDisabled("Касается надписей PayDay и часов, которые показываются поверх игры.")
         imgui.Spacing()
         if imgui.Button(ic("ROTATE_LEFT", "") .. " Сбросить внешний вид##reset_look", imgui.ImVec2(230, 28)) then
             UI_CFG.accent = UI_CFG.halloween and { 0.98, 0.55, 0.12 } or { 0.18, 0.45, 0.85 }
@@ -3860,7 +3796,8 @@ function UIFX.set_tex(s)
     if (UIFX.tex_budget or 1) <= 0 then return nil end
     UIFX.tex_budget = (UIFX.tex_budget or 1) - 1
     local ok, tex = pcall(function()
-        local path = cfg_dir .. "arizona_set_" .. s.key .. ".jpg"
+        ensure_cache()
+        local path = cache_dir .. "set_" .. s.key .. ".jpg"
         local need = math.floor(#(s.data:gsub("[^%w%+/]", "")) * 6 / 8)
         local have = 0
         local f = io.open(path, "rb")
@@ -4145,7 +4082,8 @@ qHW0gZhQqkDev//Z
 function UIFX.logo_tex()
     if UIFX.logo ~= nil or UIFX.logo_failed then return UIFX.logo end
     local ok, tex = pcall(function()
-        local path = cfg_dir .. "arizona_logo.jpg"
+        ensure_cache()
+        local path = cache_dir .. "logo.jpg"
         local need = math.floor(#(UIFX.LOGO:gsub("[^%w%+/]", "")) * 6 / 8)
         local have = 0
         local f = io.open(path, "rb")
@@ -4418,7 +4356,8 @@ function UIFX.icon_tex(key)
     local data = UIFX.ICONS[key]
     if not data then e.failed = true; return nil end
     local ok, tex = pcall(function()
-        local path = cfg_dir .. "arizona_icon_" .. key .. ".png"
+        ensure_cache()
+        local path = cache_dir .. "icon_" .. key .. ".png"
         local need = math.floor(#(data:gsub("[^%w%+/]", "")) * 6 / 8)
         local have = 0
         local f = io.open(path, "rb")
@@ -4716,9 +4655,7 @@ end
 
 
 local function draw_extra_tab(id)
-    if id == 3 then
-        draw_payday_tab()
-    elseif id == 4 then
+    if id == 4 then
         UIFX.draw_sets_tab()
     elseif id == 5 then
         draw_about_tab()
@@ -4727,34 +4664,53 @@ local function draw_extra_tab(id)
     end
 end
 
-local payday_frame
-payday_frame = imgui.OnFrame(
-    function()
-        payday_frame.HideCursor = not payday_edit
-        return payday_on[0]
-    end,
-    guard_frame("payday", function()
-        if payday_edit and not main_window[0] then payday_edit = false end
-        local flags = bit.bor(imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.AlwaysAutoResize, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoSavedSettings)
-        if not payday_edit then
-            flags = bit.bor(flags, imgui.WindowFlags.NoMove, imgui.WindowFlags.NoInputs, imgui.WindowFlags.NoBackground)
-            imgui.SetNextWindowPos(imgui.ImVec2(payday_pos.x, payday_pos.y), imgui.Cond.Always)
+
+-- Подключение иконок к шрифту. В разных версиях fAwesome6 по-разному: где-то есть fa.Init(),
+-- где-то только данные шрифта (fa.get_font_data_base85) - тогда подключаем вручную.
+local fa_keep = {}
+local fa_diag_done = false
+local function fa_merge(font_size)
+    if type(fa.Init) == "function" then
+        if font_size and pcall(fa.Init, font_size) then return true end
+        if pcall(fa.Init) then return true end
+    end
+    local data
+    if type(fa.get_font_data_base85) == "function" then
+        local ok, d = pcall(fa.get_font_data_base85, "solid")
+        if ok and type(d) == "string" and #d > 100 then data = d end
+        if not data then
+            ok, d = pcall(fa.get_font_data_base85)
+            if ok and type(d) == "string" and #d > 100 then data = d end
         end
-        imgui.SetNextWindowBgAlpha(0.45)
-        imgui.Begin("##payday_overlay", nil, flags)
-        imgui.SetWindowFontScale(UI_CFG.overlay_scale)
-        shadow_text(imgui.ImVec4(1.00, 0.85, 0.30, 1.00), payday_text())
-        if payday_edit then
-            local pos = imgui.GetWindowPos()
-            payday_pos.x, payday_pos.y = pos.x, pos.y
+    end
+    if not data then
+        if not fa_diag_done then
+            fa_diag_done = true
+            local names = {}
+            for k, v in pairs(fa) do
+                if type(k) == "string" and not k:match("^[A-Z0-9_]+$") then
+                    names[#names + 1] = k .. ":" .. type(v)
+                end
+            end
+            table.sort(names)
+            log_error("fa_diag", "нет способа подключить иконки; поля fAwesome6: " .. table.concat(names, ", "))
         end
-        imgui.End()
-    end, function() payday_on[0] = false end)
-)
+        return false
+    end
+    local mn = tonumber(fa.min_range) or 0xE000
+    local mx = tonumber(fa.max_range) or 0xF8FF
+    local cfg = imgui.ImFontConfig()
+    cfg.MergeMode = true
+    cfg.PixelSnapH = true
+    local ranges = imgui.new.ImWchar[3](mn, mx, 0)
+    fa_keep[#fa_keep + 1] = { cfg, ranges } -- держим в памяти до сборки атласа шрифтов
+    local f = imgui.GetIO().Fonts:AddFontFromMemoryCompressedBase85TTF(data, font_size or 14, cfg, ranges)
+    return f ~= nil
+end
 
 imgui.OnInitialize(function()
-    -- иконки в стандартный шрифт (его создаёт mimgui)
-    safe_call("fa_init", function() fa.Init() end)
+    -- иконки сначала в стандартный шрифт (его создаёт mimgui), потом ещё раз в свой шрифт ниже
+    safe_call("fa_init", function() fa_merge(nil) end)
     -- шрифт рисуем в 2 раза крупнее и уменьшаем масштабом: так крупные надписи (SetWindowFontScale) остаются чёткими,
     -- а обычный текст выглядит как раньше
     safe_call("custom_font", function()
@@ -4776,7 +4732,7 @@ imgui.OnInitialize(function()
         local font = io_.Fonts:AddFontFromFileTTF(path, 28, nil, io_.Fonts:GetGlyphRangesCyrillic())
         if font ~= nil then
             -- иконки в тот же крупный размер (если версия fAwesome6 не принимает размер, берётся обычный)
-            if not pcall(fa.Init, 28) then pcall(fa.Init) end
+            fa_merge(28)
             io_.FontDefault = font
             io_.FontGlobalScale = 0.5
         end
@@ -4825,8 +4781,8 @@ local function layout_update(wsz)
         imgui.SetWindowSize(wsz, imgui.Cond.Always)
     end
     LAYOUT.w, LAYOUT.h = wsz.x, wsz.y
-    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 6) - 5, 26, 46)
-    LAYOUT.block_y = 5 + 6 * (LAYOUT.tab_h + 5) + 6
+    LAYOUT.tab_h = clamp(math.floor((LAYOUT.h - 161) / 5) - 5, 26, 46)
+    LAYOUT.block_y = 5 + 5 * (LAYOUT.tab_h + 5) + 6
     local w, h = math.floor(wsz.x + 0.5), math.floor(wsz.y + 0.5)
     if w ~= UI_CFG.win_w or h ~= UI_CFG.win_h then
         UI_CFG.win_w, UI_CFG.win_h = w, h
@@ -4910,10 +4866,9 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 imgui.SetCursorPos(imgui.ImVec2(5, 5))
                 sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1, "Таблица цен предметов (клавиша 1)\nCtrl+F - быстрый поиск")
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
-                sidebar_tab(ic("CLOCK", "") .. " Отчет до PayDay", 3, "Таймер до PayDay на экране (клавиша 3)")
-                sidebar_tab(ic("LAYER_GROUP", "") .. " Коллекционные сеты", 4, "Коллекционные сеты (клавиша 4)")
-                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 5)")
-                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 6)")
+                                sidebar_tab(ic("LAYER_GROUP", "") .. " Коллекционные сеты", 4, "Коллекционные сеты (клавиша 3)")
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 4)")
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 5)")
                 UIFX.draw_bar(wpos)
                 draw_update_block()
 
