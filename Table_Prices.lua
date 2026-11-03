@@ -2,7 +2,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "4.1" -- Метка для старых версий
+local SCRIPT_VERSION = "4.2" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -321,7 +321,7 @@ local UIFX = {
     table_t = -10,    -- момент начала каскадной анимации строк таблицы
     was_open = false,
     splashed = false, -- заставка уже показана в этой игровой сессии
-    TAB_ORDER = { 1, 2, 4, 5, 7 }, -- порядок вкладок слева (цифры 1-5 на клавиатуре)
+    TAB_ORDER = { 1, 2, 5, 7 }, -- порядок вкладок слева (цифры 1-4 на клавиатуре)
 }
 
 -- шрифты берём из системной папки Windows (там есть кириллица), ничего скачивать не нужно
@@ -1472,7 +1472,7 @@ local about_links = {
     { icon = "COMMENTS",    logo = "ds", title = "Discord-канал",               sub = "Общение и обновления",         url = "https://discord.gg/z4UmCnRwd",                color = {0.35, 0.40, 0.95} },
     { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@cosmychesky_jetpack", color = {0.86, 0.15, 0.40} },
     { icon = "USER",        logo = "ds", title = "Discord разработчика",        sub = "Нажми, чтобы скопировать ник", copy = "sawnoff_karabin07", color = {0.35, 0.40, 0.95} },
-    { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика",             sub = "Баги, идеи, предложения",      url = "https://t.me/xi_vivide",                      color = {0.16, 0.62, 0.86} },
+    { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика",             sub = "Баги, идеи, предложения",      url = "https://t.me/arzprices_ceo",                      color = {0.16, 0.62, 0.86} },
     { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика 2",           sub = "Кодер",                        url = "https://t.me/obrezik",                        color = {0.16, 0.62, 0.86} },
 }
 
@@ -2189,11 +2189,11 @@ local function on_window_message(msg, wparam, lparam)
 
     if is_repeat then return end
 
-    -- горячие клавиши внутри открытого меню: цифры 1-5 переключают вкладки, Ctrl+F - поиск по таблице
+    -- горячие клавиши внутри открытого меню: цифры 1-4 переключают вкладки, Ctrl+F - поиск по таблице
     if main_window[0] and UIFX.alpha > 0.5 and not hk.typing then
         local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
         if not (okc and busy) then
-            if wparam >= 0x31 and wparam <= 0x35 then
+            if wparam >= 0x31 and wparam <= 0x34 then
                 UIFX.pending_tab = UIFX.TAB_ORDER[wparam - 0x30]
                 consumeWindowMessage(true, true)
                 return
@@ -4866,9 +4866,8 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 imgui.SetCursorPos(imgui.ImVec2(5, 5))
                 sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1, "Таблица цен предметов (клавиша 1)\nCtrl+F - быстрый поиск")
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
-                                sidebar_tab(ic("LAYER_GROUP", "") .. " Коллекционные сеты", 4, "Коллекционные сеты (клавиша 3)")
-                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 4)")
-                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 5)")
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Соцсети и разработчик (клавиша 3)")
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 4)")
                 UIFX.draw_bar(wpos)
                 draw_update_block()
 
