@@ -1468,6 +1468,7 @@ end
 
 
 local about_links = {
+    { icon = "GLOBE", title = "Сайт скрипта", sub = "Гайд по установке и ссылки", url = "https://hydracrmpdesign-commits.github.io/arizona-prices/", color = {0.96, 0.62, 0.15} },
     { icon = "PAPER_PLANE", logo = "tg", title = "Telegram-канал",              sub = "Актуальные цены и новости",    url = "https://t.me/arizona_prices",                 color = {0.16, 0.62, 0.86} },
     { icon = "COMMENTS",    logo = "ds", title = "Discord-канал",               sub = "Общение и обновления",         url = "https://discord.gg/z4UmCnRwd",                color = {0.35, 0.40, 0.95} },
     { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@cosmychesky_jetpack", color = {0.86, 0.15, 0.40} },
