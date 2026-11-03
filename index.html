@@ -71,8 +71,68 @@
   .lightbox img { max-width: 100%; max-height: 100%; border-radius: 12px; box-shadow: 0 0 60px rgba(245,158,39,.25); }
   .lightbox .close { position: absolute; top: 18px; right: 24px; font-size: 40px; color: #f2f2f5; cursor: pointer; line-height: 1; }
 </style>
+<style id="splash-css">
+  #splash { position: fixed; inset: 0; z-index: 9999; background: #0b0d0c; display: flex; align-items: center; justify-content: center; padding: 16px; transition: opacity .6s ease, visibility .6s; font-family: 'Segoe UI', system-ui, sans-serif; }
+  #splash.hide { opacity: 0; visibility: hidden; }
+  #splash .sp-card { width: 100%; max-width: 430px; background: #111416; border: 1px solid #1f2a24; border-radius: 16px; padding: 30px 28px; box-shadow: 0 20px 60px rgba(0,0,0,.5); animation: spIn .6s ease both; }
+  #splash .sp-label { display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 700; letter-spacing: .14em; color: #4ade80; }
+  #splash .sp-dot { width: 7px; height: 7px; border-radius: 50%; background: #4ade80; }
+  #splash .sp-title { margin-top: 12px; font-size: 22px; font-weight: 800; color: #f2f2f5; }
+  #splash .sp-desc { margin-top: 10px; font-size: 14px; line-height: 1.5; color: #9aa3a0; }
+  #splash .sp-status { margin-top: 22px; border: 1px solid #22a06b; border-radius: 12px; padding: 14px 16px; background: #0f1714; display: flex; align-items: center; gap: 14px; }
+  #splash .sp-icon { width: 38px; height: 38px; border-radius: 10px; background: #4ade80; color: #06140c; display: flex; align-items: center; justify-content: center; font-weight: 900; font-size: 18px; flex-shrink: 0; }
+  #splash .sp-small { font-size: 11px; letter-spacing: .08em; color: #6b7673; text-transform: uppercase; }
+  #splash .sp-msg { margin-top: 3px; font-size: 15px; font-weight: 700; color: #f2f2f5; }
+  #splash .sp-bar { margin-top: 14px; height: 4px; border-radius: 4px; background: #1d2622; overflow: hidden; }
+  #splash .sp-fill { height: 100%; width: 0; background: #4ade80; transition: width .25s linear; }
+  #splash .sp-foot { margin-top: 18px; font-size: 11px; color: #6b7673; }
+  @keyframes spIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+</style>
 </head>
 <body>
+<div id="splash">
+  <div class="sp-card">
+    <div class="sp-label"><span class="sp-dot"></span>ARIZONA PRICES</div>
+    <div class="sp-title">Загрузка сайта</div>
+    <div class="sp-desc">Это займёт несколько секунд. Как только всё будет готово, страница откроется сама.</div>
+    <div class="sp-status">
+      <div class="sp-icon" id="spIcon">…</div>
+      <div>
+        <div class="sp-small">Подготовка</div>
+        <div class="sp-msg" id="spMsg">Загружаем страницу...</div>
+      </div>
+    </div>
+    <div class="sp-bar"><div class="sp-fill" id="spFill"></div></div>
+    <div class="sp-foot">Arizona Prices · неофициальный скрипт</div>
+  </div>
+</div>
+<script>
+(function () {
+  var splash = document.getElementById('splash');
+  var fill = document.getElementById('spFill');
+  var msg = document.getElementById('spMsg');
+  var icon = document.getElementById('spIcon');
+  var seen = false;
+  try { seen = sessionStorage.getItem('ap_splash') === '1'; } catch (e) {}
+  if (seen) { splash.style.display = 'none'; return; }
+  try { sessionStorage.setItem('ap_splash', '1'); } catch (e) {}
+  function hide() { splash.classList.add('hide'); setTimeout(function () { splash.style.display = 'none'; }, 700); }
+  var p = 0;
+  var timer = setInterval(function () {
+    p += 4 + Math.random() * 10;
+    if (p >= 100) {
+      p = 100; clearInterval(timer);
+      fill.style.width = '100%';
+      icon.textContent = '✓';
+      msg.textContent = 'Готово. Открываем сайт...';
+      setTimeout(hide, 500);
+    } else {
+      fill.style.width = p + '%';
+    }
+  }, 180);
+})();
+</script>
+
 <div class="deco" style="left:4%; top:12%">🎃</div>
 <div class="deco d2" style="right:5%; top:28%">🦇</div>
 <div class="deco d3" style="left:8%; top:62%">🦇</div>
