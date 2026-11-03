@@ -114,9 +114,22 @@
   var icon = document.getElementById('spIcon');
   var seen = false;
   try { seen = sessionStorage.getItem('ap_splash') === '1'; } catch (e) {}
-  if (seen) { splash.style.display = 'none'; return; }
+  if ('scrollRestoration' in history) history.scrollRestoration = 'manual';
+  var hash = location.hash;
+  if (hash) { history.replaceState(null, '', location.pathname + location.search); }
+  window.scrollTo(0, 0);
+  if (seen) { splash.style.display = 'none'; if (hash) { var el0 = document.querySelector(hash); if (el0) el0.scrollIntoView(); } return; }
   try { sessionStorage.setItem('ap_splash', '1'); } catch (e) {}
-  function hide() { splash.classList.add('hide'); setTimeout(function () { splash.style.display = 'none'; }, 700); }
+  document.documentElement.style.overflow = 'hidden';
+  document.body.style.overflow = 'hidden';
+  function hide() {
+    splash.classList.add('hide');
+    document.documentElement.style.overflow = '';
+    document.body.style.overflow = '';
+    window.scrollTo(0, 0);
+    if (hash) { var el = document.querySelector(hash); if (el) el.scrollIntoView(); }
+    setTimeout(function () { splash.style.display = 'none'; }, 700);
+  }
   var p = 0;
   var timer = setInterval(function () {
     p += 4 + Math.random() * 10;
