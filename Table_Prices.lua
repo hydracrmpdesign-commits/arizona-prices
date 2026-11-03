@@ -2,7 +2,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "4.5" -- Метка для старых версий
+local SCRIPT_VERSION = "4.6" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -1468,9 +1468,8 @@ end
 
 
 local about_links = {
-    { icon = "GLOBE", title = "Сайт скрипта", sub = "Гайд по установке и ссылки", url = "https://hydracrmpdesign-commits.github.io/arizona-prices/", color = {0.96, 0.62, 0.15} },
     { icon = "PAPER_PLANE", logo = "tg", title = "Telegram-канал",              sub = "Актуальные цены и новости",    url = "https://t.me/arizona_prices",                 color = {0.16, 0.62, 0.86} },
-    { icon = "COMMENTS",    logo = "ds", title = "Discord-канал",               sub = "Общение и обновления",         url = "https://discord.gg/z4UmCnRwd",                color = {0.35, 0.40, 0.95} },
+    { icon = "GLOBE",       title = "Сайт скрипта",              sub = "Гайд по установке и ссылки",   url = "https://hydracrmpdesign-commits.github.io/arizona-prices/",   color = {0.96, 0.62, 0.15} },
     { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@cosmychesky_jetpack", color = {0.86, 0.15, 0.40} },
     { icon = "USER",        logo = "ds", title = "Discord разработчика",        sub = "Нажми, чтобы скопировать ник", copy = "vasyablackwoode", color = {0.35, 0.40, 0.95} },
     { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика",             sub = "Баги, идеи, предложения",      url = "https://t.me/arzprices_ceo",                      color = {0.16, 0.62, 0.86} },
@@ -2191,8 +2190,9 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
     imgui.PopStyleColor(3)
     imgui.SameLine()
     if AUTH.button("check", "Получить код", "auth_tg", bw + 40, 46) then
-        open_url("https://t.me/arizona_prices")
+        open_url("https://hydracrmpdesign-commits.github.io/arizona-prices/")
     end
+    if imgui.IsItemHovered() then imgui.SetTooltip("Код здесь") end
     imgui.SameLine()
     if AUTH.button("cross", "Закрыть", "auth_close", bw - 40, 46) then AUTH.open[0] = false end
     imgui.SetWindowFontScale(1.0)
