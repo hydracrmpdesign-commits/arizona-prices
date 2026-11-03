@@ -2,7 +2,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "4.3" -- Метка для старых версий
+local SCRIPT_VERSION = "4.4" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -2021,6 +2021,7 @@ local AUTH = {
     code = imgui.new.char[48](),
     error = "",
     ok = false,
+    DELAY = 10, -- сколько секунд идёт «Загрузка» после ввода кода
 }
 
 -- уже входил с этим кодом раньше?
@@ -2031,6 +2032,46 @@ do
     end
 end
 
+-- Значки рисуются линиями, а не символами шрифта: у некоторых игроков шрифт иконок не грузится и вместо них был "?"
+function AUTH.icon(kind, cx, cy, sz, r, g, b, a)
+    local dl = imgui.GetWindowDrawList()
+    local c = col32(r, g, b, a)
+    local th = math.max(2, sz * 0.14)
+    local function P(x, y) return imgui.ImVec2(cx + x * sz, cy + y * sz) end
+    if kind == "check" then
+        dl:AddLine(P(-0.5, 0.02), P(-0.14, 0.38), c, th)
+        dl:AddLine(P(-0.14, 0.38), P(0.52, -0.38), c, th)
+    elseif kind == "cross" then
+        dl:AddLine(P(-0.38, -0.38), P(0.38, 0.38), c, th)
+        dl:AddLine(P(0.38, -0.38), P(-0.38, 0.38), c, th)
+    elseif kind == "login" then
+        dl:AddLine(P(-0.5, 0), P(0.45, 0), c, th)
+        dl:AddLine(P(0.05, -0.42), P(0.5, 0), c, th)
+        dl:AddLine(P(0.05, 0.42), P(0.5, 0), c, th)
+    elseif kind == "lock" then
+        dl:AddRectFilled(P(-0.42, -0.02), P(0.42, 0.5), c, sz * 0.1)
+        local px, py
+        for i = 0, 10 do
+            local ang = math.pi + i / 10 * math.pi
+            local x, y = math.cos(ang) * 0.28, -0.02 + math.sin(ang) * 0.34
+            if px then dl:AddLine(P(px, py), P(x, y), c, th) end
+            px, py = x, y
+        end
+    end
+end
+
+-- кнопка: слева значок, справа текст (место под значок занимают пробелы)
+function AUTH.button(kind, text, id, w, h)
+    local isz = 16
+    local spw = math.max(imgui.CalcTextSize(" ").x, 1)
+    local label = string.rep(" ", math.ceil((isz + 8) / spw)) .. text
+    local clicked = imgui.Button(label .. "##" .. id, imgui.ImVec2(w, h))
+    local mn, mx = imgui.GetItemRectMin(), imgui.GetItemRectMax()
+    local x0 = (mn.x + mx.x) / 2 - imgui.CalcTextSize(label).x / 2
+    AUTH.icon(kind, x0 + isz / 2, (mn.y + mx.y) / 2, isz, 1, 1, 1, 0.95)
+    return clicked
+end
+
 function AUTH.try_login()
     local nick = ffi.string(AUTH.nick):gsub("^%s+", ""):gsub("%s+$", "")
     local code = ffi.string(AUTH.code):gsub("%s", "")
@@ -2038,10 +2079,10 @@ function AUTH.try_login()
     if code == "" then AUTH.error = "Введите код из телеграм-канала"; return end
     if AUTH.loading then return end
     AUTH.error = ""
-    AUTH.loading = { t = imgui.GetTime(), nick = nick, code = code }
+    AUTH.loading = { t = imgui.GetTime(), nick = nick, code = code, valid = (code:lower() == AUTH.ACCESS_CODE:lower()) }
 end
 
--- фаза 2 (через 3 секунды): проверяем код и открываем меню
+-- фаза 2 (через AUTH.DELAY секунд): проверяем код и открываем меню
 function AUTH.finish()
     local nick, code = AUTH.loading.nick, AUTH.loading.code
     AUTH.loading = nil
@@ -2073,7 +2114,10 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
 
     imgui.SetCursorPos(imgui.ImVec2(26, 24))
     imgui.SetWindowFontScale(1.7)
-    imgui.TextColored(accent_vec(1.2), ic("LOCK", "") .. " Авторизация")
+    local tv = accent_vec(1.2)
+    AUTH.icon("lock", p.x + 26 + 14, p.y + 24 + imgui.GetTextLineHeight() / 2 - 2, 26, tv.x, tv.y, tv.z, 1)
+    imgui.SetCursorPos(imgui.ImVec2(26 + 38, 24))
+    imgui.TextColored(tv, "Авторизация")
     imgui.SetWindowFontScale(1.15)
     imgui.SetCursorPos(imgui.ImVec2(26, 76))
     imgui.PushTextWrapPos(W - 26)
@@ -2083,7 +2127,7 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
     if AUTH.loading then
         -- экран «Загрузка...»: крутящийся индикатор, меняющиеся статусы и полоска прогресса
         local now = imgui.GetTime()
-        local k = clamp((now - AUTH.loading.t) / 3.0, 0, 1)
+        local k = clamp((now - AUTH.loading.t) / AUTH.DELAY, 0, 1)
         local dl = imgui.GetWindowDrawList()
         local cx, cy = p.x + W / 2, p.y + 165
         for i = 0, 11 do
@@ -2092,8 +2136,16 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
             dl:AddCircleFilled(imgui.ImVec2(cx + math.cos(ang) * 34, cy + math.sin(ang) * 34), 5.5,
                 col32(ac[1], ac[2], ac[3], 0.15 + 0.85 * (1 - fade)), 12)
         end
-        local steps = { "Подключение к серверу...", "Проверка кода...", "Верификация никнейма...", "Доступ разрешён" }
-        local st = steps[math.min(#steps, 1 + math.floor(k * #steps))]
+        -- последний этап зависит от результата: верный код - "Доступ разрешён", неверный - "Неверный код"
+        local steps = { "Подключение к серверу...", "Проверка кода...", "Верификация никнейма...", "Подготовка данных..." }
+        local good = AUTH.loading.valid
+        local st, stcol = nil, imgui.ImVec4(0.65, 0.65, 0.72, 1)
+        if k >= 0.88 then
+            if good then st, stcol = "Доступ разрешён", imgui.ImVec4(0.30, 0.85, 0.45, 1)
+            else st, stcol = "Неверный код", imgui.ImVec4(1.0, 0.4, 0.4, 1) end
+        else
+            st = steps[math.min(#steps, 1 + math.floor(k / 0.88 * #steps))]
+        end
         imgui.SetCursorPos(imgui.ImVec2(0, 232))
         imgui.SetWindowFontScale(1.6)
         local dots = string.rep(".", math.floor(now * 3) % 4)
@@ -2102,9 +2154,9 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
         imgui.Text(title)
         imgui.SetWindowFontScale(1.1)
         imgui.SetCursorPosX((W - imgui.CalcTextSize(st).x) / 2)
-        imgui.TextColored(imgui.ImVec4(0.65, 0.65, 0.72, 1), st)
+        imgui.TextColored(stcol, st)
         imgui.SetCursorPos(imgui.ImVec2(60, H - 46))
-        imgui.PushStyleColor(imgui.Col.PlotHistogram, accent_vec(1.1))
+        imgui.PushStyleColor(imgui.Col.PlotHistogram, (k >= 0.88 and not good) and imgui.ImVec4(1.0, 0.4, 0.4, 1) or accent_vec(1.1))
         imgui.ProgressBar(k, imgui.ImVec2(W - 120, 10), "")
         imgui.PopStyleColor(1)
         imgui.SetWindowFontScale(1.0)
@@ -2134,14 +2186,14 @@ imgui.OnFrame(function() return AUTH.open[0] end, guard_frame("auth", function()
     imgui.PushStyleColor(imgui.Col.Button, accent_vec(1.0))
     imgui.PushStyleColor(imgui.Col.ButtonHovered, accent_vec(1.15))
     imgui.PushStyleColor(imgui.Col.ButtonActive, accent_vec(0.85))
-    if imgui.Button(ic("RIGHT_TO_BRACKET", "") .. " Войти##auth_go", imgui.ImVec2(bw, 46)) then AUTH.try_login() end
+    if AUTH.button("login", "Войти", "auth_go", bw, 46) then AUTH.try_login() end
     imgui.PopStyleColor(3)
     imgui.SameLine()
-    if imgui.Button(ic("PAPER_PLANE", "") .. " Получить код##auth_tg", imgui.ImVec2(bw + 40, 46)) then
+    if AUTH.button("check", "Получить код", "auth_tg", bw + 40, 46) then
         open_url("https://t.me/arizona_prices")
     end
     imgui.SameLine()
-    if imgui.Button(FA.CIRCLE_XMARK .. " Закрыть##auth_close", imgui.ImVec2(bw - 40, 46)) then AUTH.open[0] = false end
+    if AUTH.button("cross", "Закрыть", "auth_close", bw - 40, 46) then AUTH.open[0] = false end
     imgui.SetWindowFontScale(1.0)
     imgui.End()
     imgui.PopStyleColor(1)
