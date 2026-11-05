@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "6.6" -- Метка для старых версий
+local SCRIPT_VERSION = "6.7" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -16272,6 +16272,7 @@ local MKT = {
     buf_price = imgui.new.char[24](),
     buf_contact = imgui.new.char[120](),
     buf_desc = imgui.new.char[300](),
+    buf_pass = imgui.new.char[64](),
     buf_csearch = imgui.new.char[64](),
     sorts = { { "new", "Сначала новые" }, { "cheap", "Сначала дешевле" }, { "exp", "Сначала дороже" }, { "name", "По названию" } },
     sort = 1,
@@ -16301,6 +16302,8 @@ local MKT = {
         notfound = "Объявление уже удалено",
         bad = "Заполните все поля",
         server = "Ошибка на сервере, попробуйте позже",
+        shortpass = "Пароль слишком короткий: минимум 4 символа",
+        badpass = "Неверный пароль для этого ника. Введите тот, что задавали раньше",
     },
 }
 
@@ -16580,7 +16583,7 @@ end
 
 -- что запоминаем между запусками: сервер, валюта, контакт, соцсеть
 function MKT.prefs_key()
-    return MKT.social .. "|" .. MKT.home .. "|" .. MKT.currency .. "|" .. ffi.string(MKT.buf_contact) .. "|" .. ffi.string(MKT.buf_watch)
+    return MKT.social .. "|" .. MKT.home .. "|" .. MKT.currency .. "|" .. ffi.string(MKT.buf_contact) .. "|" .. ffi.string(MKT.buf_watch) .. "|" .. ffi.string(MKT.buf_pass)
 end
 
 function MKT.load_prefs()
@@ -16593,6 +16596,7 @@ function MKT.load_prefs()
     if type(d.currency) == "number" and d.currency >= 1 and d.currency <= #MKT.currencies then MKT.currency = d.currency end
     if type(d.contact) == "string" then ffi.copy(MKT.buf_contact, d.contact:sub(1, 119)) end
     if type(d.watch) == "string" then ffi.copy(MKT.buf_watch, d.watch:sub(1, 119)) end
+    if type(d.pass) == "string" then ffi.copy(MKT.buf_pass, d.pass:sub(1, 63)) end
 end
 
 function MKT.save_prefs()
@@ -16602,6 +16606,7 @@ function MKT.save_prefs()
         currency = MKT.currency,
         contact = ffi.string(MKT.buf_contact),
         watch = ffi.string(MKT.buf_watch),
+        pass = ffi.string(MKT.buf_pass),
     })
     if not ok then return end
     if not doesDirectoryExist(getWorkingDirectory() .. "\\config") then
@@ -16665,10 +16670,11 @@ end
 function MKT.start_edit(it)
     MKT.edit_id = it.id
     MKT.kind = it.type == "buy" and "buy" or "sell"
-    ffi.copy(MKT.buf_item, tostring(it.item or ""))
-    ffi.copy(MKT.buf_price, tostring(math.floor(tonumber(it.price) or 0)))
-    ffi.copy(MKT.buf_contact, tostring(it.contact or ""))
-    ffi.copy(MKT.buf_desc, tostring(it.desc or ""))
+    -- длину обрезаем под размер поля: иначе запись выходит за границу памяти и игра падает
+    ffi.copy(MKT.buf_item, tostring(it.item or ""):sub(1, 63))
+    ffi.copy(MKT.buf_price, tostring(math.floor(tonumber(it.price) or 0)):sub(1, 23))
+    ffi.copy(MKT.buf_contact, tostring(it.contact or ""):sub(1, 119))
+    ffi.copy(MKT.buf_desc, tostring(it.desc or ""):sub(1, 299))
     for i, name in ipairs(MKT.home_servers) do
         if name == it.home then MKT.home = i end
     end
@@ -16798,35 +16804,16 @@ function MKT.draw_create_body(srv)
             imgui.TextDisabled("В таблице цен нет такого предмета")
         end
         for i, it in ipairs(sugg) do
-            local pp = imgui.GetCursorScreenPos()
-            local pw = imgui.GetContentRegionAvail().x
-            local p2 = imgui.ImVec2(pp.x + pw, pp.y + 40)
-            local hov = imgui.IsMouseHoveringRect(pp, p2)
-            if hov then
-                imgui.GetWindowDrawList():AddRectFilled(pp, p2, col32(1.0, 0.69, 0.23, 0.22), 4)
+            -- одна строка = один предмет; текст крупнее, без иконок (они могли вызывать падение)
+            imgui.SetWindowFontScale(1.3)
+            if imgui.Selectable(tostring(it.item) .. "##cr_sugg_" .. i, false) then
+                ffi.copy(MKT.buf_item, tostring(it.item):sub(1, 63))
+                MKT.buf_csearch[0] = 0
             end
-            imgui.BeginGroup()
-            local ikey = item_icon_key(it.item)
-            local tex = ikey and UIFX.icon_tex(ikey) or nil
-            if tex then
-                imgui.Image(tex, imgui.ImVec2(32, 32))
-            else
-                imgui.Dummy(imgui.ImVec2(32, 32))
+            if imgui.IsItemHovered() then
+                imgui.SetTooltip("Нажмите, чтобы выбрать")
             end
-            imgui.SameLine()
-            imgui.Text(tostring(it.item))
-            imgui.EndGroup()
-            if hov then
-                if imgui.IsMouseClicked(0) then
-                    ffi.copy(MKT.buf_item, tostring(it.item))
-                    MKT.buf_csearch[0] = 0
-                end
-                imgui.BeginTooltip()
-                imgui.Text(tostring(it.item))
-                imgui.TextDisabled("Нажмите, чтобы выбрать")
-                imgui.EndTooltip()
-            end
-            imgui.Spacing()
+            imgui.SetWindowFontScale(1.0)
         end
         imgui.EndChild()
         imgui.PopStyleColor(1)
@@ -16885,6 +16872,15 @@ function MKT.draw_create_body(srv)
     imgui.InputTextWithHint("##cr_desc", "Торг, обмен, условия", MKT.buf_desc, ffi.sizeof(MKT.buf_desc))
     imgui.PopItemWidth()
 
+    -- пароль ника: первый пароль задаёт владелец ника, дальше без него не выставить
+    imgui.TextColored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), "Пароль для вашего ника (минимум 4 символа)")
+    imgui.PushStyleColor(imgui.Col.Text, imgui.ImVec4(0.75, 0.75, 0.8, 1.0))
+    imgui.TextWrapped("ЗАПОМНИТЕ ПАРОЛЬ! Его нельзя восстановить или сменить. Без него не получится выставлять объявления с этим ником.")
+    imgui.PopStyleColor(1)
+    imgui.PushItemWidth(-1)
+    imgui.InputTextWithHint("##cr_pass", "Например: мой пароль, не забыть!", MKT.buf_pass, ffi.sizeof(MKT.buf_pass))
+    imgui.PopItemWidth()
+
     -- проверка заполнения
     local name = (ffi.string(MKT.buf_item):gsub("^%s+", ""):gsub("%s+$", ""))
     local price = tonumber((ffi.string(MKT.buf_price):gsub("[%s%.,]", "")))
@@ -16893,6 +16889,7 @@ function MKT.draw_create_body(srv)
     if name == "" then missing[#missing + 1] = "предмет" end
     if not price or price <= 0 then missing[#missing + 1] = "цену" end
     if contact == "" then missing[#missing + 1] = "контакт" end
+    if #ffi.string(MKT.buf_pass) < 4 then missing[#missing + 1] = "пароль (от 4 символов)" end
     imgui.Spacing()
     if #missing > 0 then
         imgui.TextColored(imgui.ImVec4(1.0, 0.5, 0.5, 1.0), "Нужно заполнить: " .. table.concat(missing, ", "))
@@ -16921,6 +16918,7 @@ function MKT.draw_create_body(srv)
                 .. "&price=" .. math.floor(price) .. "&type=" .. MKT.kind
                 .. "&nick=" .. MKT.enc(nick) .. "&token=" .. MKT.enc(MKT.get_token())
                 .. "&contact=" .. MKT.enc(contact)
+                .. "&pass=" .. MKT.enc(ffi.string(MKT.buf_pass))
                 .. "&home=" .. MKT.enc(MKT.home_servers[MKT.home])
                 .. "&currency=" .. MKT.enc(MKT.currencies[MKT.currency].code)
                 .. "&desc=" .. MKT.enc((ffi.string(MKT.buf_desc):gsub("^%s+", ""):gsub("%s+$", ""))))
@@ -17177,7 +17175,7 @@ function MKT.draw()
     local csz = imgui.GetIO().DisplaySize
     imgui.SetNextWindowPos(imgui.ImVec2(csz.x / 2, csz.y / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
     imgui.SetNextWindowSize(imgui.ImVec2(580, 700), imgui.Cond.Always)
-    imgui.PushStyleColor(imgui.Col.PopupBg, imgui.ImVec4(0.07, 0.07, 0.09, 0.98))
+    imgui.PushStyleColor(imgui.Col.PopupBg, imgui.ImVec4(0.07, 0.07, 0.09, 1.0))
     if imgui.BeginPopupModal("##mkt_create", nil, bit.bor(imgui.WindowFlags.NoMove, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoCollapse)) then
         MKT.draw_create_body(srv)
         imgui.EndPopup()
