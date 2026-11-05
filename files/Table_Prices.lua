@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "6.7" -- Метка для старых версий
+local SCRIPT_VERSION = "6.9" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -16294,6 +16294,15 @@ local MKT = {
     file_favs = getWorkingDirectory() .. "\\config\\arizona_market_fav.json",
     buf_watch = imgui.new.char[120](),
     age_idx = 1,
+    cd_idx = 1,
+    cd_list = {
+        { "1001", 3 }, { "1101", 4 }, { "1201", 5 }, { "1301", 5 }, { "1401", 5 },
+        { "1501", 6 }, { "1601", 6 }, { "1701", 6 }, { "1801", 6 }, { "1901", 6 },
+    },
+    cd_opts = {
+        "Без КД", "1001 - 3 КД", "1101 - 4 КД", "1201 - 5 КД", "1301 - 5 КД", "1401 - 5 КД",
+        "1501 - 6 КД", "1601 - 6 КД", "1701 - 6 КД", "1801 - 6 КД", "1901 - 6 КД",
+    },
     ages = { { "Все", 0 }, { "1 ч", 1 }, { "6 ч", 6 }, { "24 ч", 24 } },
     errors = {
         limit = "У вас уже 5 объявлений на этом сервере",
@@ -16674,7 +16683,15 @@ function MKT.start_edit(it)
     ffi.copy(MKT.buf_item, tostring(it.item or ""):sub(1, 63))
     ffi.copy(MKT.buf_price, tostring(math.floor(tonumber(it.price) or 0)):sub(1, 23))
     ffi.copy(MKT.buf_contact, tostring(it.contact or ""):sub(1, 119))
-    ffi.copy(MKT.buf_desc, tostring(it.desc or ""):sub(1, 299))
+    -- КД вынимаем из описания обратно в выпадающий список, чтобы не дублировать его
+    local desc = tostring(it.desc or "")
+    local code = desc:match(" | КД: (%d+) %(%-%d+%)")
+    desc = (desc:gsub(" | КД: %d+ %(%-%d+%)", ""))
+    ffi.copy(MKT.buf_desc, desc:sub(1, 299))
+    MKT.cd_idx = 1
+    for i, c in ipairs(MKT.cd_list) do
+        if c[1] == code then MKT.cd_idx = i + 1 end
+    end
     for i, name in ipairs(MKT.home_servers) do
         if name == it.home then MKT.home = i end
     end
@@ -16760,6 +16777,27 @@ function MKT.suggest(q)
     return out
 end
 
+-- коллекционный предмет: в скобках метка Легендарный / Хлам / Редкий
+function MKT.is_collectible(name)
+    local n = ru_lower(tostring(name or ""))
+    for grp in n:gmatch("%((.-)%)") do
+        if grp:find("легендарн", 1, true) or grp:find("хлам", 1, true) or grp:find("редк", 1, true) then
+            return true
+        end
+    end
+    return false
+end
+
+-- описание для объявления: к тексту добавляем КД на тайники, если он выбран
+function MKT.desc_with_cd()
+    local d = (ffi.string(MKT.buf_desc):gsub("^%s+", ""):gsub("%s+$", ""))
+    if MKT.is_collectible(ffi.string(MKT.buf_item)) and MKT.cd_idx > 1 then
+        local c = MKT.cd_list[MKT.cd_idx - 1]
+        d = d .. " | КД: " .. c[1] .. " (-" .. c[2] .. ")"
+    end
+    return d:sub(1, 300)
+end
+
 -- тело окна «Выставить предмет»
 function MKT.draw_create_body(srv)
     local w = imgui.GetContentRegionAvail().x
@@ -16817,6 +16855,21 @@ function MKT.draw_create_body(srv)
         end
         imgui.EndChild()
         imgui.PopStyleColor(1)
+    end
+
+    -- КД на тайники: появляется сразу под предметом, только у коллекционных
+    if MKT.is_collectible(ffi.string(MKT.buf_item)) then
+        imgui.Text("КД на тайники")
+        imgui.PushItemWidth(-1)
+        if imgui.BeginCombo("##cr_cd", MKT.cd_opts[MKT.cd_idx]) then
+            for i, o in ipairs(MKT.cd_opts) do
+                if imgui.Selectable(o .. "##cr_cd_" .. i, i == MKT.cd_idx) then
+                    MKT.cd_idx = i
+                end
+            end
+            imgui.EndCombo()
+        end
+        imgui.PopItemWidth()
     end
 
     -- цена и валюта
@@ -16921,7 +16974,7 @@ function MKT.draw_create_body(srv)
                 .. "&pass=" .. MKT.enc(ffi.string(MKT.buf_pass))
                 .. "&home=" .. MKT.enc(MKT.home_servers[MKT.home])
                 .. "&currency=" .. MKT.enc(MKT.currencies[MKT.currency].code)
-                .. "&desc=" .. MKT.enc((ffi.string(MKT.buf_desc):gsub("^%s+", ""):gsub("%s+$", ""))))
+                .. "&desc=" .. MKT.enc(MKT.desc_with_cd()))
             MKT.buf_item[0] = 0
             MKT.buf_price[0] = 0
             MKT.buf_contact[0] = 0
@@ -17233,6 +17286,11 @@ function MKT.draw()
             imgui.SetCursorPosX(150)
             imgui.Text(tostring(value))
         end
+        -- КД на тайники берём из описания и показываем отдельной строкой
+        local cd_code, cd_n = tostring(d.desc or ""):match("КД: (%d+) %(%-(%d+)%)")
+        if cd_code then
+            info("КД на тайники", cd_code .. " - " .. cd_n .. " КД")
+        end
         info("Продавец", d.nick or "")
         info("Родной сервер", d.home or "Vice-City")
         info("Контакт", d.contact or "не указан")
@@ -17242,7 +17300,8 @@ function MKT.draw()
         imgui.TextDisabled("Описание")
         imgui.PushStyleColor(imgui.Col.ChildBg, imgui.ImVec4(0.11, 0.11, 0.14, 1.0))
         imgui.BeginChild("##mkt_det_desc", imgui.ImVec2(-1, 170), true)
-        local desc = (d.desc and d.desc ~= "") and d.desc or "Продавец не добавил описание"
+        local desc_clean = (tostring(d.desc or ""):gsub(" | КД: %d+ %(%-%d+%)", ""))
+        local desc = (desc_clean ~= "") and desc_clean or "Продавец не добавил описание"
         imgui.PushTextWrapPos(imgui.GetCursorPosX() + imgui.GetWindowWidth() - 24)
         imgui.TextWrapped(tostring(desc))
         imgui.PopTextWrapPos()
