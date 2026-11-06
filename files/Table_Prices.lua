@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "6.9" -- Метка для старых версий
+local SCRIPT_VERSION = "7.0" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -243,6 +243,7 @@ local function load_data()
 end
 
 local function save_data()
+    TBL_RESET = (TBL_RESET or 0) + 1
     local dir = getWorkingDirectory() .. "\\config"
     if not doesDirectoryExist(dir) then
         createDirectory(dir)
@@ -1359,14 +1360,22 @@ local function draw_item_icon(ikey, row_y, rowh)
     imgui.SetCursorPosX(imgui.GetCursorPosX() + 48)
 end
 local function item_icon_key(name)
-    local n = ru_lower((name or ""):gsub("%s+", " ")):gsub("^ ", "")
+    name = name or ""
+    UIFX.icon_keys = UIFX.icon_keys or {}
+    local cached = UIFX.icon_keys[name]
+    if cached ~= nil then return cached or nil end
+    local n = ru_lower(name:gsub("%s+", " ")):gsub("^ ", "")
+    local found = nil
     for _, r in ipairs(ITEM_ICON_RULES) do
-        if r[3] == "c" and n:find(r[1], 1, true) then return r[2] end
+        if r[3] == "c" and n:find(r[1], 1, true) then found = r[2]; break end
     end
-    for _, r in ipairs(ITEM_ICON_RULES) do
-        if r[3] == nil and n:sub(1, #r[1]) == r[1] then return r[2] end
+    if not found then
+        for _, r in ipairs(ITEM_ICON_RULES) do
+            if r[3] == nil and n:sub(1, #r[1]) == r[1] then found = r[2]; break end
+        end
     end
-    return nil
+    UIFX.icon_keys[name] = found or false
+    return found
 end
 
 local function sidebar_tab(label, id, tip)
@@ -1716,8 +1725,8 @@ end
 local about_links = {
     { icon = "PAPER_PLANE", logo = "tg", title = "Telegram-канал",              sub = "Актуальные цены и новости",    url = "https://t.me/arizona_prices",                 color = {0.16, 0.62, 0.86} },
     { icon = "GLOBE",       title = "Сайт скрипта",              sub = "Гайд по установке и ссылки",   url = "https://hydracrmpdesign-commits.github.io/arizona-prices/",   color = {0.96, 0.62, 0.15} },
-    { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@cosmychesky_jetpack", color = {0.86, 0.15, 0.40} },
-    { icon = "USER",        logo = "ds", title = "Discord разработчика",        sub = "Нажми, чтобы скопировать ник", copy = "vasyablackwoode", color = {0.35, 0.40, 0.95} },
+    { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@vasyanich_lydetto", color = {0.86, 0.15, 0.40} },
+    { icon = "USER",        logo = "ds", title = "Discord разработчика",        sub = "Нажми, чтобы скопировать ник", copy = "vasyanich_lydetto", color = {0.35, 0.40, 0.95} },
     { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика",             sub = "Баги, идеи, предложения",      url = "https://t.me/arzprices_ceo",                      color = {0.16, 0.62, 0.86} },
     { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика 2",           sub = "Кодер",                        url = "https://t.me/obrezik",                        color = {0.16, 0.62, 0.86} },
 }
@@ -16286,6 +16295,9 @@ local MKT = {
     detail = nil,
     want_create = false,
     want_confirm = false,
+    admin_key_mem = nil,
+    want_admin = false,
+    buf_admin = imgui.new.char[64](),
     confirm = nil,
     edit_id = nil,
     chain_add = nil,
@@ -16562,6 +16574,7 @@ function MKT.view(q)
     for _, it in ipairs(MKT.items) do
         local okType = MKT.tab == "all" or MKT.tab == it.type
         if MKT.tab == "fav" then okType = MKT.favs[tostring(it.id)] == true end
+        if MKT.tab == "mine" then okType = it.mine == true end
         -- каждое слово из поиска должно встречаться в названии: "нимб 5" найдёт "Нимб +5"
         local okName = true
         if q ~= "" then
@@ -17018,32 +17031,57 @@ function MKT.draw()
     -- шапка: название, выбор сервера, кнопка выставить
     imgui.TextColored(imgui.ImVec4(1.0, 0.45, 0.35, 1.0), "●")
     imgui.SameLine()
-    imgui.TextColored(accent_vec(1.3), "Маркет")
-    imgui.SameLine()
-    imgui.TextDisabled(MKT.market)
-    imgui.SameLine(math.max(120, imgui.GetWindowWidth() - 300))
+    imgui.TextColored(accent_vec(1.3), "Prices Market")
     imgui.SameLine(math.max(120, imgui.GetWindowWidth() - 190))
     if MKT.pill("create", "+ Выставить", true, 130, 30) then
         MKT.edit_id = nil
         MKT.want_create = true
     end
-    imgui.SameLine(imgui.GetWindowWidth() - 36)
-    if imgui.Button(ic("XMARK", "X") .. "##mkt_close", imgui.ImVec2(26, 24)) then
+    imgui.SameLine(imgui.GetWindowWidth() - 29)
+    imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0, 0, 0, 0))
+    if imgui.Button(FA.CIRCLE_XMARK .. "##mkt_close", imgui.ImVec2(24, 24)) then
         main_window[0] = false
     end
+    if imgui.IsItemHovered() then imgui.SetTooltip("Закрыть") end
+    imgui.PopStyleColor(1)
 
     -- фильтры: все / сдам-продаю / куплю
     imgui.Spacing()
-    local tabs = { { "Все", "all" }, { "Сдам / продаю", "sell" }, { "Куплю", "buy" }, { "Избранное", "fav" } }
+    -- кнопки ряда переносятся на новую строку, если не помещаются в окно
+    local row_w = imgui.GetWindowWidth() - 24
+    local row_x = 0
+    local function row_pos(w)
+        if row_x > 0 then
+            if row_x + w > row_w then
+                row_x = 0
+            else
+                imgui.SameLine()
+                row_x = row_x + 8
+            end
+        end
+        row_x = row_x + w
+    end
+    local tabs = { { "Все", "all" }, { "Сдам / продаю", "sell" }, { "Куплю", "buy" }, { "Избранное", "fav" }, { "Мои", "mine" } }
     for _, t in ipairs(tabs) do
         local tw = imgui.CalcTextSize(t[1]).x + 34
+        row_pos(tw)
         if MKT.pill("tab_" .. t[2], t[1], MKT.tab == t[2], tw, 30) then
             MKT.tab = t[2]
         end
-        imgui.SameLine()
     end
+    row_pos(120)
     if MKT.pill("refresh", "Обновить", false, 120, 30) then
         MKT.need_list = true
+    end
+    -- режим админа: пароль вводится в игре и хранится только в памяти, в файл не пишется
+    row_pos(130)
+    if MKT.pill("admin", MKT.admin_key_mem and "Админ: вкл" or "Админ", MKT.admin_key_mem ~= nil, 130, 30) then
+        if MKT.admin_key_mem then
+            MKT.admin_key_mem = nil
+            MKT.set_status("Режим админа выключен", true)
+        else
+            MKT.want_admin = true
+        end
     end
     imgui.Spacing()
 
@@ -17211,7 +17249,8 @@ function MKT.draw()
         imgui.PushStyleColor(imgui.Col.Button, ready and imgui.ImVec4(0.6, 0.15, 0.15, 1.0) or imgui.ImVec4(0.22, 0.22, 0.26, 1.0))
         if imgui.Button("Удалить##mkt_conf_yes", imgui.ImVec2(150, 34)) and ready then
             MKT.send("delete", "server=" .. MKT.enc(MKT.market) .. "&id=" .. MKT.enc(c.id)
-                .. "&token=" .. MKT.enc(MKT.get_token()))
+                .. "&token=" .. MKT.enc(MKT.get_token())
+                .. (c.admin and MKT.admin_key_mem and ("&admin=" .. MKT.enc(MKT.admin_key_mem)) or ""))
             MKT.confirm = nil
             imgui.CloseCurrentPopup()
         end
@@ -17219,6 +17258,39 @@ function MKT.draw()
         imgui.EndPopup()
     end
     imgui.PopStyleColor(2)
+
+    -- ввод пароля админа: в файл не сохраняется, живёт только до выключения или перезапуска скрипта
+    if MKT.want_admin then
+        MKT.want_admin = false
+        ffi.copy(MKT.buf_admin, "")
+        imgui.OpenPopup("##mkt_admin")
+    end
+    imgui.PushStyleColor(imgui.Col.PopupBg, imgui.ImVec4(0.09, 0.09, 0.12, 1.0))
+    if imgui.BeginPopupModal("##mkt_admin", nil, bit.bor(imgui.WindowFlags.NoMove, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoCollapse)) then
+        imgui.TextColored(imgui.ImVec4(1.0, 0.75, 0.3, 1.0), "Режим админа")
+        imgui.TextDisabled("Пароль не сохраняется в файл. После перезапуска скрипта введите снова.")
+        imgui.Spacing()
+        imgui.PushItemWidth(-1)
+        imgui.InputTextWithHint("##adm_pass", "Пароль админа", MKT.buf_admin, ffi.sizeof(MKT.buf_admin))
+        imgui.PopItemWidth()
+        imgui.Spacing()
+        if imgui.Button("Войти##adm_ok", imgui.ImVec2(150, 34)) then
+            local p = ffi.string(MKT.buf_admin)
+            if p ~= "" then
+                MKT.admin_key_mem = p
+                MKT.set_status("Режим админа включён", true)
+            end
+            ffi.copy(MKT.buf_admin, "")
+            imgui.CloseCurrentPopup()
+        end
+        imgui.SameLine()
+        if imgui.Button("Отмена##adm_no", imgui.ImVec2(150, 34)) then
+            ffi.copy(MKT.buf_admin, "")
+            imgui.CloseCurrentPopup()
+        end
+        imgui.EndPopup()
+    end
+    imgui.PopStyleColor(1)
 
     -- окно «Выставить предмет»
     if MKT.want_create then
@@ -17314,6 +17386,14 @@ function MKT.draw()
             imgui.PushStyleColor(imgui.Col.Button, MKT.rainbow_btn(2.2))
             if imgui.Button("Написать продавцу##mkt_det_w", imgui.ImVec2(-1, 36)) then
                 MKT.open_link(d.contact)
+            end
+            imgui.PopStyleColor(1)
+        end
+        if MKT.admin_key_mem and not d.mine then
+            imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(0.55, 0.12, 0.12, 1.0))
+            if imgui.Button("Удалить (админ)##mkt_det_admdel", imgui.ImVec2(-1, 30)) then
+                MKT.confirm = { id = d.id, item = tostring(d.item), t0 = os.clock(), admin = true }
+                MKT.want_confirm = true
             end
             imgui.PopStyleColor(1)
         end
@@ -17546,16 +17626,6 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
             pcall(imgui.SetNextWindowSizeConstraints, imgui.ImVec2(700, 400), imgui.ImVec2(math.max(700, sw - 20), math.max(400, sh - 20)))
             if imgui.Begin(u8("Arizona Prices##main_window"), main_window[0] and main_window or nil, bit.bor(imgui.WindowFlags.NoCollapse, imgui.WindowFlags.NoResize, imgui.WindowFlags.NoTitleBar, imgui.WindowFlags.NoScrollbar, imgui.WindowFlags.NoScrollWithMouse, imgui.WindowFlags.NoMove)) then
                 layout_update(imgui.GetWindowSize())
-                -- кнопка закрытия в правом верхнем углу; курсор возвращаем, чтобы не сбить раскладку
-                do
-                    local keep = imgui.GetCursorPos()
-                    local wsz = imgui.GetWindowSize()
-                    imgui.SetCursorPos(imgui.ImVec2(wsz.x - 36, 8))
-                    if imgui.Button(ic("XMARK", "X") .. "##main_close", imgui.ImVec2(26, 24)) then
-                        main_window[0] = false
-                    end
-                    imgui.SetCursorPos(keep)
-                end
                 local wpos = imgui.GetWindowPos()
                 local win_cx, win_cy = wpos.x + LAYOUT.w / 2, wpos.y + LAYOUT.h / 2
                 hk.typing = imgui.GetIO().WantTextInput
@@ -17708,65 +17778,74 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                     imgui.Separator()
 
                     local table_bottom_y = imgui.GetCursorScreenPos().y - separator_spacing - 1.0 
-                    local display_indices = {} 
                     local search_query = lower_cp1251(ffi.string(buf_search))
-
-                    -- фильтры "Коллекционные" / "Прочее" (пункты 4 и 5 в списке сортировки)
                     local flt = current_sort[0]
-                    local coll_marks = { u8:decode("легендарн"), u8:decode("хлам"), u8:decode("редк") }
-                    local prof_mark = u8:decode("проф.")
-                    local function is_collectible(name)
-                        -- метка стоит в скобках: "Нимб лича (Легендарный)", "(Хлам/Редкий)"
-                        for grp in name:gmatch("%((.-)%)") do
-                            for _, m in ipairs(coll_marks) do
-                                if grp:find(m, 1, true) then return true end
+                    -- список строк пересчитываем только когда поменялся поиск, фильтр, сортировка, список или избранное
+                    local favs_n = 0
+                    for _ in pairs(settings.favs) do favs_n = favs_n + 1 end
+                    local tbl_key = table.concat({ search_query, flt, #items_list, favs_n, TBL_RESET or 0 }, "\1")
+                    UIFX.tbl_cache = UIFX.tbl_cache or { key = nil, indices = {} }
+                    local tc = UIFX.tbl_cache
+                    if tc.key ~= tbl_key then
+                        tc.key = tbl_key
+                        local coll_marks = { u8:decode("легендарн"), u8:decode("хлам"), u8:decode("редк") }
+                        local prof_mark = u8:decode("проф.")
+                        local function is_collectible(name)
+                            -- метка стоит в скобках: "Нимб лича (Легендарный)", "(Хлам/Редкий)"
+                            for grp in name:gmatch("%((.-)%)") do
+                                for _, m in ipairs(coll_marks) do
+                                    if grp:find(m, 1, true) then return true end
+                                end
+                            end
+                            for grp in name:gmatch("%[(.-)%]") do
+                                for _, m in ipairs(coll_marks) do
+                                    if grp:find(m, 1, true) then return true end
+                                end
+                            end
+                            return false
+                        end
+                        local function is_other(name)
+                            return name:gsub("^%s+", ""):sub(1, #prof_mark) == prof_mark
+                        end
+
+                        local list = {}
+                        for i, v in ipairs(items_list) do
+                            local item_name = lower_cp1251(v.item or "")
+                            if search_query == "" or item_name:find(search_query, 1, true) then
+                                if flt == 4 then
+                                    if is_collectible(item_name) then list[#list + 1] = i end
+                                elseif flt == 5 then
+                                    if is_other(item_name) then list[#list + 1] = i end
+                                else
+                                    list[#list + 1] = i
+                                end
                             end
                         end
-                        for grp in name:gmatch("%[(.-)%]") do
-                            for _, m in ipairs(coll_marks) do
-                                if grp:find(m, 1, true) then return true end
-                            end
+
+                        if flt == 1 then
+                            table.sort(list, function(a, b) return tonumber(items_list[a].sell or 0) > tonumber(items_list[b].sell or 0) end)
+                        elseif flt == 2 then
+                            table.sort(list, function(a, b) return tonumber(items_list[a].sell or 0) < tonumber(items_list[b].sell or 0) end)
+                        elseif flt == 3 then
+                            table.sort(list, function(a, b) local name_a = (items_list[a].item or ""):lower() local name_b = (items_list[b].item or ""):lower() return name_a < name_b end)
                         end
-                        return false
-                    end
-                    local function is_other(name)
-                        return name:gsub("^%s+", ""):sub(1, #prof_mark) == prof_mark
-                    end
 
-                    for i, v in ipairs(items_list) do 
-                        local item_name = lower_cp1251(v.item or "") 
-                        if search_query == "" or item_name:find(search_query, 1, true) then 
-                            if flt == 4 then
-                                if is_collectible(item_name) then table.insert(display_indices, i) end
-                            elseif flt == 5 then
-                                if is_other(item_name) then table.insert(display_indices, i) end
-                            else
-                                table.insert(display_indices, i) 
+                        if next(settings.favs) then
+                            -- избранные поднимаем наверх (порядок внутри групп сохраняется)
+                            local favs_first, rest = {}, {}
+                            for _, ix in ipairs(list) do
+                                if items_list[ix] and settings.favs[items_list[ix].item] then
+                                    favs_first[#favs_first + 1] = ix
+                                else
+                                    rest[#rest + 1] = ix
+                                end
                             end
-                        end 
-                    end
-
-                    if current_sort[0] == 1 then 
-                        table.sort(display_indices, function(a, b) return tonumber(items_list[a].sell or 0) > tonumber(items_list[b].sell or 0) end)
-                    elseif current_sort[0] == 2 then 
-                        table.sort(display_indices, function(a, b) return tonumber(items_list[a].sell or 0) < tonumber(items_list[b].sell or 0) end)
-                    elseif current_sort[0] == 3 then 
-                        table.sort(display_indices, function(a, b) local name_a = (items_list[a].item or ""):lower() local name_b = (items_list[b].item or ""):lower() return name_a < name_b end)
-                    end
-
-                    if next(settings.favs) then
-                        -- избранные поднимаем наверх (порядок внутри групп сохраняется)
-                        local favs_first, rest = {}, {}
-                        for _, ix in ipairs(display_indices) do
-                            if items_list[ix] and settings.favs[items_list[ix].item] then
-                                favs_first[#favs_first + 1] = ix
-                            else
-                                rest[#rest + 1] = ix
-                            end
+                            for _, ix in ipairs(rest) do favs_first[#favs_first + 1] = ix end
+                            list = favs_first
                         end
-                        for _, ix in ipairs(rest) do favs_first[#favs_first + 1] = ix end
-                        display_indices = favs_first
+                        tc.indices = list
                     end
+                    local display_indices = tc.indices
                     local ROW_H = 44 -- высота строки таблицы
                     local row_now = imgui.GetTime()
                     for ri, idx in ipairs(display_indices) do 
