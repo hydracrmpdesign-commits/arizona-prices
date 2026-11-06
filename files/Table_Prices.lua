@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "7.0" -- Метка для старых версий
+local SCRIPT_VERSION = "7.1" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -17645,7 +17645,8 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
                 sidebar_tab(ic("CART_SHOPPING", "") .. " Маркетплейс", 9, "Объявления игроков вашего сервера")
                 sidebar_tab(ic("ARROWS_ROTATE", "") .. " Автообновление", 8, "Проверка обновлений и цен (клавиша 3)")
-                                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 4)")
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Информация о скрипте, ссылки и контакты")
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 4)")
                 UIFX.draw_bar(wpos)
 
                 -- Правая часть (содержимое выбранной вкладки)
