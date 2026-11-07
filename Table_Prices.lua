@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "7.1" -- Метка для старых версий
+local SCRIPT_VERSION = "7.2" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -2060,6 +2060,8 @@ local function start_checks()
     end
 end
 
+local request_update -- объявлено заранее, определяется ниже
+
 local function handle_version()
     local path = cfg_dir .. "arizona_prices_remote_version.txt"
     local c = read_file(path)
@@ -2067,11 +2069,13 @@ local function handle_version()
     local v = c and c:match("%d[%d%.]*")
     if v and version_newer(v, SCRIPT_VERSION) then
         if not update_info.available then
-            notify("Вышла новая версия " .. v .. "! Откройте /prices и нажмите «Обновить»", "info", 8)
+            notify("Вышла новая версия " .. v .. "! Обновляюсь автоматически...", "info", 8)
         end
         update_info.available = true
         update_info.version = v
         update_info.status = ""
+        -- обновляем сами, без вопросов; если уже качаем, второй раз не запускаем
+        if not update_info.busy then request_update() end
     elseif manual_check then
         update_info.status = v and "У вас последняя версия" or "Не удалось проверить"
     end
@@ -2199,7 +2203,7 @@ local function start_update()
     end
 end
 
-local function request_update()
+function request_update()
     update_info.busy = true
     update_info.status = ""
     busy_since = os.time()
