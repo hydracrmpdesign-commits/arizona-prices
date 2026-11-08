@@ -1,59 +1,153 @@
-// Cloudflare Worker "arizona-prices": хранит цены и отдаёт их скрипту.
-// Нужно: KV-пространство с привязкой PRICES и секрет ADMIN_KEY.
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type",
-};
-const LIQ = ["Ликвид", "Средне", "Неликвид"];
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Цены: админка</title>
+<style>
+  :root { --bg:#0d0f14; --card:#161922; --line:#262b38; --text:#e8ebf2; --muted:#8a92a6; --acc:#3a7bd9; --ok:#4cc38a; --bad:#e5604f; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.4 system-ui, sans-serif; }
+  .wrap { max-width:980px; margin:0 auto; padding:16px; }
+  h1 { font-size:22px; margin:8px 0 16px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px; margin-bottom:14px; }
+  input, select, button { font:inherit; color:var(--text); background:#0f1219; border:1px solid var(--line); border-radius:8px; padding:8px 10px; }
+  input:focus, select:focus { outline:none; border-color:var(--acc); }
+  button { cursor:pointer; background:var(--acc); border-color:var(--acc); color:#fff; }
+  button.ghost { background:transparent; color:var(--muted); border-color:var(--line); }
+  button.danger { background:transparent; color:var(--bad); border-color:#4a2a28; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; }
+  .grow { flex:1; min-width:160px; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:6px 4px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:600; font-size:13px; }
+  td input { width:100%; }
+  td.num input { width:110px; }
+  .muted { color:var(--muted); font-size:13px; }
+  #status { min-height:20px; }
+  .ok { color:var(--ok); } .bad { color:var(--bad); }
+  @media (max-width:640px) { th.hide, td.hide { display:none; } td.num input { width:90px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Цены предметов</h1>
 
-function json(obj, status = 200) {
-  return new Response(JSON.stringify(obj), {
-    status,
-    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
-  });
+  <div class="card">
+    <div class="row">
+      <input id="key" type="password" class="grow" placeholder="Ключ админа">
+      <button id="btnLoad" class="ghost">Загрузить с сервера</button>
+      <button id="btnSeed" class="ghost">Взять из GitHub (item_prices.json)</button>
+    </div>
+    <p class="muted">Ключ нигде не сохраняется: после перезагрузки страницы его нужно ввести заново.</p>
+  </div>
+
+  <div class="card">
+    <div class="row" style="margin-bottom:10px">
+      <input id="search" class="grow" placeholder="Поиск по названию">
+      <button id="btnAdd" class="ghost">+ Добавить предмет</button>
+      <button id="btnSave">Сохранить на сервер</button>
+    </div>
+    <div id="status" class="muted"></div>
+    <table>
+      <thead><tr><th>Предмет</th><th>Скупка</th><th>Продажа</th><th class="hide">Ликвидность</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+  </div>
+</div>
+
+<script>
+const API = "https://arizona-prices.hydracrmpdesign.workers.dev";
+const RAW = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/item_prices.json";
+const LIQ = ["", "Ликвид", "Средне", "Неликвид"];
+let items = [];
+
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
+
+function setStatus(text, cls) { $("status").className = cls || "muted"; $("status").textContent = text; }
+
+function render() {
+  const q = $("search").value.trim().toLowerCase();
+  const rows = items.map((it, i) => ({ it, i })).filter(({ it }) => !q || String(it.item || "").toLowerCase().includes(q));
+  $("rows").innerHTML = rows.map(({ it, i }) => `
+    <tr>
+      <td><input data-i="${i}" data-f="item" value="${esc(it.item)}"></td>
+      <td class="num"><input data-i="${i}" data-f="buy" type="number" min="0" value="${esc(it.buy)}"></td>
+      <td class="num"><input data-i="${i}" data-f="sell" type="number" min="0" value="${esc(it.sell)}"></td>
+      <td class="hide"><select data-i="${i}" data-f="liq">${LIQ.map((l) => `<option value="${l}" ${((it.liq || "") === l) ? "selected" : ""}>${l || "—"}</option>`).join("")}</select></td>
+      <td><button class="danger" data-del="${i}">✕</button></td>
+    </tr>`).join("") || `<tr><td colspan="5" class="muted">Пусто</td></tr>`;
 }
 
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+function collect() {
+  return items.map((it) => ({ ...it, buy: Number(it.buy), sell: Number(it.sell) }));
+}
 
-    // скрипт и админ-страница читают цены
-    if (url.pathname === "/prices" && request.method === "GET") {
-      const raw = await env.PRICES.get("LIST");
-      return new Response(raw || "[]", {
-        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
-      });
-    }
+$("rows").addEventListener("input", (e) => {
+  const i = e.target.dataset.i, f = e.target.dataset.f;
+  if (i === undefined) return;
+  items[i][f] = e.target.value;
+});
+$("rows").addEventListener("change", (e) => {
+  const i = e.target.dataset.i, f = e.target.dataset.f;
+  if (i !== undefined && f === "liq") items[i].liq = e.target.value || null;
+});
+$("rows").addEventListener("click", (e) => {
+  const d = e.target.dataset.del;
+  if (d === undefined) return;
+  if (!confirm("Удалить предмет из списка?")) return;
+  items.splice(Number(d), 1);
+  render();
+});
+$("search").addEventListener("input", render);
 
-    // сохранение: только с правильным ключом админа
-    if (url.pathname === "/save" && request.method === "POST") {
-      let body;
-      try { body = await request.json(); } catch { return json({ error: "bad" }, 400); }
-      if (!env.ADMIN_KEY || body.admin !== env.ADMIN_KEY) return json({ error: "forbidden" }, 403);
-      if (!Array.isArray(body.items)) return json({ error: "bad" }, 400);
-      if (body.items.length > 5000) return json({ error: "limit" }, 400);
-
-      const clean = [];
-      for (const r of body.items) {
-        const item = String(r.item || "").trim().slice(0, 100);
-        const buy = Number(r.buy);
-        const sell = Number(r.sell);
-        if (!item || !Number.isFinite(buy) || !Number.isFinite(sell) || buy < 0 || sell < 0) {
-          return json({ error: "bad", item }, 400);
-        }
-        clean.push({
-          item,
-          buy: Math.round(buy),
-          sell: Math.round(sell),
-          liq: LIQ.includes(r.liq) ? r.liq : null,
-        });
-      }
-      await env.PRICES.put("LIST", JSON.stringify(clean));
-      return json({ ok: true, count: clean.length });
-    }
-
-    return json({ error: "notfound" }, 404);
-  },
+$("btnAdd").onclick = () => {
+  items.unshift({ item: "", buy: 0, sell: 0, liq: null });
+  $("search").value = "";
+  render();
+  $("rows").querySelector('input[data-f="item"]')?.focus();
 };
+
+$("btnLoad").onclick = async () => {
+  try {
+    setStatus("Загружаю...");
+    const r = await fetch(API + "/prices?t=" + Date.now(), { cache: "no-store" });
+    items = await r.json();
+    render();
+    setStatus("Загружено предметов: " + items.length, "ok");
+  } catch (e) { setStatus("Не удалось загрузить: " + e.message, "bad"); }
+};
+
+$("btnSeed").onclick = async () => {
+  try {
+    setStatus("Беру из GitHub...");
+    const r = await fetch(RAW + "?t=" + Date.now(), { cache: "no-store" });
+    items = await r.json();
+    render();
+    setStatus("Взято из GitHub: " + items.length + ". Не забудь нажать «Сохранить на сервер».", "ok");
+  } catch (e) { setStatus("Не удалось взять из GitHub: " + e.message, "bad"); }
+};
+
+$("btnSave").onclick = async () => {
+  const key = $("key").value;
+  if (!key) return setStatus("Введи ключ админа", "bad");
+  const clean = collect().filter((x) => String(x.item || "").trim() !== "");
+  if (clean.some((x) => !Number.isFinite(x.buy) || !Number.isFinite(x.sell))) {
+    return setStatus("Проверь цены: есть пустые или неверные значения", "bad");
+  }
+  try {
+    setStatus("Сохраняю...");
+    const r = await fetch(API + "/save", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ admin: key, items: clean }),
+    });
+    const data = await r.json();
+    if (!r.ok) return setStatus(data.error === "forbidden" ? "Неверный ключ админа" : "Ошибка: " + (data.error || r.status), "bad");
+    setStatus("Сохранено: " + data.count + " предметов. Скрипты обновят цены в течение получаса.", "ok");
+  } catch (e) { setStatus("Не удалось сохранить: " + e.message, "bad"); }
+};
+</script>
+</body>
+</html>
