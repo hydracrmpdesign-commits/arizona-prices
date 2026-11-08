@@ -1,0 +1,59 @@
+// Cloudflare Worker "arizona-prices": хранит цены и отдаёт их скрипту.
+// Нужно: KV-пространство с привязкой PRICES и секрет ADMIN_KEY.
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type",
+};
+const LIQ = ["Ликвид", "Средне", "Неликвид"];
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
+  });
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (request.method === "OPTIONS") return new Response(null, { headers: CORS });
+
+    // скрипт и админ-страница читают цены
+    if (url.pathname === "/prices" && request.method === "GET") {
+      const raw = await env.PRICES.get("LIST");
+      return new Response(raw || "[]", {
+        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store", ...CORS },
+      });
+    }
+
+    // сохранение: только с правильным ключом админа
+    if (url.pathname === "/save" && request.method === "POST") {
+      let body;
+      try { body = await request.json(); } catch { return json({ error: "bad" }, 400); }
+      if (!env.ADMIN_KEY || body.admin !== env.ADMIN_KEY) return json({ error: "forbidden" }, 403);
+      if (!Array.isArray(body.items)) return json({ error: "bad" }, 400);
+      if (body.items.length > 5000) return json({ error: "limit" }, 400);
+
+      const clean = [];
+      for (const r of body.items) {
+        const item = String(r.item || "").trim().slice(0, 100);
+        const buy = Number(r.buy);
+        const sell = Number(r.sell);
+        if (!item || !Number.isFinite(buy) || !Number.isFinite(sell) || buy < 0 || sell < 0) {
+          return json({ error: "bad", item }, 400);
+        }
+        clean.push({
+          item,
+          buy: Math.round(buy),
+          sell: Math.round(sell),
+          liq: LIQ.includes(r.liq) ? r.liq : null,
+        });
+      }
+      await env.PRICES.put("LIST", JSON.stringify(clean));
+      return json({ ok: true, count: clean.length });
+    }
+
+    return json({ error: "notfound" }, 404);
+  },
+};
