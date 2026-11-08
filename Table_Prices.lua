@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "7.2" -- Метка для старых версий
+local SCRIPT_VERSION = "7.3" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -1955,6 +1955,8 @@ end
 -- ===================== Автообновление (скрипт и цены) =====================
 -- (версия задана в начале файла: SCRIPT_VERSION)
 local UPDATE_BASE = "https://raw.githubusercontent.com/hydracrmpdesign-commits/arizona-prices/main/"
+-- цены берём с нашего сервиса (правятся через админ-страницу)
+PRICES_URL = "https://arizona-prices.hydracrmpdesign.workers.dev/prices"
 local CHECK_EVERY = 1800 -- проверять обновления раз в 30 минут
 local cfg_dir = getWorkingDirectory() .. "\\config\\"
 local cache_dir = cfg_dir .. "arizona_prices_cache\\"  -- картинки интерфейса: их можно удалить, скрипт пересоздаст
@@ -2034,7 +2036,7 @@ local function fetch(name, dest, flag)
         update_info.status = "Загрузка недоступна"
         return false
     end
-    local url = UPDATE_BASE .. name .. "?t=" .. os.time()
+    local url = (name:match("^https://") and name or (UPDATE_BASE .. name)) .. "?t=" .. os.time()
     local ok = pcall(downloadUrlToFile, url, dest, function(id, status, p1, p2)
         if status == dlstatus.STATUSEX_ENDDOWNLOAD then
             dl_done[flag] = true
@@ -2056,7 +2058,7 @@ local function start_checks()
     if not junk_cleared then junk_cleared = true; pcall(clear_junk) end
     fetch("version.txt", cfg_dir .. "arizona_prices_remote_version.txt", "version")
     if state.auto_prices then
-        fetch("item_prices.json", cfg_dir .. "arizona_prices_remote.json", "prices")
+        fetch(PRICES_URL, cfg_dir .. "arizona_prices_remote.json", "prices")
     end
 end
 
