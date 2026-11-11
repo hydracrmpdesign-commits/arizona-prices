@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "7.7" -- Метка для старых версий
+local SCRIPT_VERSION = "7.8" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -1389,7 +1389,6 @@ local function sidebar_tab(label, id, tip)
     local hovered = imgui.IsItemHovered()
     imgui.SetWindowFontScale(1.0)
     if clicked then UIFX.go_tab(id) end
-    if hovered and tip then imgui.SetTooltip(tip) end
     if active then
         imgui.PopStyleColor(1)
         local rmin, rmax = imgui.GetItemRectMin(), imgui.GetItemRectMax()
@@ -2549,11 +2548,7 @@ local function on_window_message(msg, wparam, lparam)
     if main_window[0] and UIFX.alpha > 0.5 and not hk.typing then
         local okc, busy = pcall(function() return sampIsChatInputActive() or sampIsDialogActive() end)
         if not (okc and busy) then
-            if wparam >= 0x31 and wparam <= 0x34 then
-                UIFX.pending_tab = UIFX.TAB_ORDER[wparam - 0x30]
-                consumeWindowMessage(true, true)
-                return
-            elseif wparam == 0x46 then
+            if wparam == 0x46 then
                 local okk, ctrl = pcall(isKeyDown, 0x11)
                 if okk and ctrl then
                     UIFX.pending_tab = 1
@@ -17729,13 +17724,12 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                     sdl:AddRectFilled(imgui.ImVec2(wpos.x + 20, wpos.y + 64), imgui.ImVec2(wpos.x + 110, wpos.y + 67), col32(sac[1], sac[2], sac[3], 1), 2)
                 end
                 imgui.SetCursorPos(imgui.ImVec2(5, 80))
-                sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Arizona Prices"), 1, "Таблица цен предметов (клавиша 1)\nCtrl+F - быстрый поиск")
-                sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
-                sidebar_tab(ic("CART_SHOPPING", "") .. " Маркетплейс", 9, "Объявления игроков вашего сервера")
-                sidebar_tab(ic("ARROWS_ROTATE", "") .. " Автообновление", 8, "Проверка обновлений и цен (клавиша 3)")
-                sidebar_tab(ic("STORE", "") .. " Онлайн лавки", 10, "Сайт онлайн-лавок игроков")
-                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Информация о скрипте, ссылки и контакты")
-                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 4)")
+                sidebar_tab(FA.CIRCLE_DOLLAR .. u8(" Таблица"), 1, nil)
+                sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, nil)
+                sidebar_tab(ic("CART_SHOPPING", "") .. " Маркетплейс", 9, nil)
+                sidebar_tab(ic("ARROWS_ROTATE", "") .. " Автообновление", 8, nil)
+                sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, nil)
+                sidebar_tab(ic("GEAR", "") .. " Настройки", 7, nil)
                 UIFX.draw_bar(wpos)
 
                 -- Правая часть (содержимое выбранной вкладки)
@@ -17757,8 +17751,8 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 imgui.AlignTextToFramePadding() 
                 imgui.SetCursorPosX(9) 
                 local hdr_pos = imgui.GetCursorScreenPos()
-                imgui.Text(FA.CIRCLE_DOLLAR .. u8(' Arizona Prices'))
-                if imgui.IsItemHovered() then
+                imgui.Text(FA.CIRCLE_DOLLAR .. u8(' Таблица'))
+                if false then
                     local r0, r1 = imgui.GetItemRectMin(), imgui.GetItemRectMax()
                     imgui.GetWindowDrawList():AddLine(imgui.ImVec2(r0.x, r1.y), imgui.ImVec2(r1.x, r1.y), col32(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 1), 1.5)
                     imgui.SetTooltip("Открыть наш Telegram-канал @arizona_prices")
