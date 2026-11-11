@@ -7,7 +7,7 @@ local ffi = require('ffi')
 local encoding = require('encoding')
 encoding.default = 'CP1251'
 local u8 = encoding.UTF8
-local SCRIPT_VERSION = "7.3" -- Метка для старых версий
+local SCRIPT_VERSION = "7.7" -- Метка для старых версий
 
 -- Проверка библиотек: если чего-то не хватает, скрипт не вылетает с непонятной ошибкой,
 -- а пишет в чат, что именно нужно установить
@@ -1728,7 +1728,6 @@ local about_links = {
     { icon = "MUSIC",       logo = "tt", title = "TikTok-канал",                sub = "Видео и обзоры",               url = "https://www.tiktok.com/@vasyanich_lydetto", color = {0.86, 0.15, 0.40} },
     { icon = "USER",        logo = "ds", title = "Discord разработчика",        sub = "Нажми, чтобы скопировать ник", copy = "vasyanich_lydetto", color = {0.35, 0.40, 0.95} },
     { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика",             sub = "Баги, идеи, предложения",      url = "https://t.me/arzprices_ceo",                      color = {0.16, 0.62, 0.86} },
-    { icon = "PAPER_PLANE", logo = "tg", title = "ЛС Разработчика 2",           sub = "Кодер",                        url = "https://t.me/obrezik",                        color = {0.16, 0.62, 0.86} },
 }
 
 -- ===================== Вкладка "О скрипте" =====================
@@ -2183,10 +2182,44 @@ local function handle_prices()
     end
 end
 
+-- ===================== График цены (история из сервиса) =====================
+HISTORY_URL = "https://arizona-prices.hydracrmpdesign.workers.dev/history"
+UIFX.chart_open = imgui.new.bool(false)
+UIFX.chart = { item = nil, points = {}, loading = false, err = nil }
+
+local function url_enc(s)
+    return (tostring(s):gsub("[^%w%-_%.~]", function(c) return string.format("%%%02X", c:byte()) end))
+end
+
+function UIFX.chart_request(name)
+    local C = UIFX.chart
+    C.item, C.points, C.loading, C.err = name, {}, true, nil
+    C.focus = true
+    UIFX.chart_open[0] = true
+    local url = HISTORY_URL .. "?item=" .. url_enc(name) .. "&t=" .. os.time()
+    local dest = cfg_dir .. "arizona_prices_chart.json"
+    local ok = pcall(downloadUrlToFile, url, dest, function(id, status)
+        if dlstatus and status == dlstatus.STATUSEX_ENDDOWNLOAD then dl_done.chart = true end
+    end)
+    if not ok then C.loading, C.err = false, "Не удалось загрузить историю" end
+end
+
+function UIFX.handle_chart()
+    local C = UIFX.chart
+    local path = cfg_dir .. "arizona_prices_chart.json"
+    local c = read_file(path)
+    os.remove(path)
+    C.loading = false
+    local ok, d = pcall(decodeJson, c or "")
+    if not ok or type(d) ~= "table" then C.err = "Ошибка данных"; return end
+    C.points = type(d.points) == "table" and d.points or {}
+end
+
 local function process_updates()
     if dl_done.version then dl_done.version = nil; pcall(handle_version) end
     if dl_done.script then dl_done.script = nil; pcall(handle_script) end
     if dl_done.prices then dl_done.prices = nil; pcall(handle_prices) end
+    if dl_done.chart then dl_done.chart = nil; pcall(UIFX.handle_chart) end
     if update_info.busy and os.time() - busy_since > 40 then
         update_info.busy = false
         update_info.status = "Не удалось скачать"
@@ -2292,7 +2325,7 @@ local AUTH = {
     nick = imgui.new.char[48](),
     code = imgui.new.char[48](),
     error = "",
-    ok = false,
+    ok = true, -- вход без кода: авторизация отключена
     DELAY = 10, -- сколько секунд идёт «Загрузка» после ввода кода
 }
 
@@ -17428,9 +17461,58 @@ function MKT.draw()
     imgui.EndChild()
 end
 
+local SHOP_URL = "https://online.arz-mcr.ru/"
+local function draw_shop_tab()
+    section_header(ic("STORE", ""), "Онлайн лавки")
+    if imgui.BeginChild("##shop_child", imgui.ImVec2(-1, LAYOUT.h - 79), true) then
+        local avail = imgui.GetContentRegionAvail().x
+        imgui.Spacing()
+        imgui.SetWindowFontScale(1.5)
+        imgui.TextColored(accent_vec(1.5), "Онлайн лавки")
+        imgui.SetWindowFontScale(1.0)
+        imgui.TextDisabled("Сайт онлайн-лавок игроков Arizona RP")
+        imgui.Spacing()
+        imgui.Separator()
+        imgui.Spacing()
+        imgui.TextWrapped("Здесь игроки выставляют и покупают предметы через сайт онлайн-лавок. Нажми кнопку ниже, сайт откроется в браузере.")
+        imgui.Spacing()
+        imgui.Spacing()
+
+        imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 0.9))
+        imgui.PushStyleColor(imgui.Col.ButtonHovered, imgui.ImVec4(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 1.0))
+        if imgui.Button(ic("ARROW_UP_RIGHT_FROM_SQUARE", "") .. "  Открыть онлайн лавки##shop_open", imgui.ImVec2(avail, 54)) then
+            open_url(SHOP_URL)
+        end
+        imgui.PopStyleColor(2)
+        imgui.Spacing()
+
+        if imgui.Button("Скопировать ссылку##shop_copy", imgui.ImVec2(avail * 0.5 - 4, 34)) then
+            imgui.SetClipboardText(SHOP_URL)
+            notify("Ссылка скопирована", "ok")
+        end
+        imgui.SameLine(0, 8)
+        imgui.TextDisabled(SHOP_URL)
+
+        imgui.Spacing()
+        imgui.Spacing()
+        imgui.Separator()
+        imgui.Spacing()
+        imgui.TextColored(accent_vec(1.2), "Как пользоваться")
+        imgui.Spacing()
+        imgui.TextWrapped("1. Нажми «Открыть онлайн лавки» - сайт откроется в браузере.")
+        imgui.TextWrapped("2. Ищи нужный предмет и смотри цены других игроков.")
+        imgui.TextWrapped("3. Все сделки проходят на сайте, скрипт в них не участвует.")
+        imgui.Spacing()
+        imgui.TextDisabled("Сайт сторонний: скрипт его не контролирует и не отвечает за его работу.")
+    end
+    imgui.EndChild()
+end
+
 local function draw_extra_tab(id)
     if id == 5 then
         draw_about_tab()
+    elseif id == 10 then
+        draw_shop_tab()
     elseif id == 7 then
         draw_settings_tab()
     elseif id == 8 then
@@ -17651,6 +17733,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                 sidebar_tab(ic("CALCULATOR", "") .. " Калькулятор", 2, "Калькулятор с историей (клавиша 2)")
                 sidebar_tab(ic("CART_SHOPPING", "") .. " Маркетплейс", 9, "Объявления игроков вашего сервера")
                 sidebar_tab(ic("ARROWS_ROTATE", "") .. " Автообновление", 8, "Проверка обновлений и цен (клавиша 3)")
+                sidebar_tab(ic("STORE", "") .. " Онлайн лавки", 10, "Сайт онлайн-лавок игроков")
                 sidebar_tab(ic("CIRCLE_INFO", "") .. " О скрипте", 5, "Информация о скрипте, ссылки и контакты")
                 sidebar_tab(ic("GEAR", "") .. " Настройки", 7, "Тема, шрифт, прозрачность (клавиша 4)")
                 UIFX.draw_bar(wpos)
@@ -17730,7 +17813,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                     local table_top_y = imgui.GetCursorScreenPos().y - table_style.WindowPadding.y 
                     local separator_spacing = table_style.ItemSpacing.y 
                     local col_wl = 92
-                    local col_w1, col_w2, col_w3 = 116, 104, ADM.on and 108 or 44
+                    local col_w1, col_w2, col_w3 = 116, 104, ADM.on and 140 or 74
                     local col_w4 = 96
                     local col_w0 = math.max(150, math.floor(imgui.GetContentRegionAvail().x) - (col_wl + col_w1 + col_w2 + col_w3 + col_w4))
                     
@@ -17981,7 +18064,7 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                                 imgui.TextDisabled(ut)
                             end
                             imgui.NextColumn()
-                            local buttons_total_width = ADM.on and (28 * 3 + 10) or 28
+                            local buttons_total_width = ADM.on and (28 * 4 + 18) or (28 * 2 + 6)
                             imgui.SetCursorPosY(row_y + (ROW_H - 24) * 0.5) 
                             imgui.SetCursorPosX(imgui.GetCursorPosX() + math.max(0, (col_w3 - buttons_total_width) * 0.5))
                             
@@ -17992,6 +18075,13 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             end
                             imgui.PopStyleColor(1)
                             if imgui.IsItemHovered() then imgui.SetTooltip(is_fav and "Убрать из избранного" or "В избранное") end
+                            imgui.SameLine(0, 6)
+                            imgui.PushStyleColor(imgui.Col.Button, imgui.ImVec4(UI_CFG.accent[1], UI_CFG.accent[2], UI_CFG.accent[3], 0.55))
+                            if imgui.Button(ic("CHART_LINE", "~") .. "##chart_" .. idx, imgui.ImVec2(28, 24)) then
+                                UIFX.chart_request(item.item)
+                            end
+                            imgui.PopStyleColor(1)
+                            if imgui.IsItemHovered() then imgui.SetTooltip("График цены") end
                             if ADM.on then
                             imgui.SameLine()
                             if imgui.Button(FA.PEN_LINE .. "##edit_" .. idx, imgui.ImVec2(28, 24)) then 
@@ -18035,6 +18125,9 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
                             if imgui.Selectable(ic("COPY", "") .. "  Скопировать в буфер##ctx_copy") then
                                 imgui.SetClipboardText(line)
                                 notify("Скопировано: " .. line, "ok", 4)
+                            end
+                            if imgui.Selectable(ic("CHART_LINE", "") .. "  График цены##ctx_chart") then
+                                UIFX.chart_request(cur.item)
                             end
                             local isf = settings.favs[cur.item] == true
                             if imgui.Selectable(ic("STAR", "*") .. (isf and "  Убрать из избранного" or "  В избранное") .. "##ctx_fav") then
@@ -18232,6 +18325,121 @@ imgui.OnFrame(function() return main_window[0] or modal_window[0] or UIFX.alpha 
 )
 
 -- ===================== Большое окно «старая версия» =====================
+local function chart_body()
+    local C = UIFX.chart
+    imgui.TextColored(accent_vec(1.4), C.item or "Предмет")
+    imgui.Separator()
+    imgui.Spacing()
+    if C.loading then imgui.TextDisabled("Загрузка истории..."); return end
+    if C.err then imgui.TextColored(imgui.ImVec4(0.95, 0.35, 0.35, 1), C.err); return end
+    local pts = C.points or {}
+    if #pts == 0 then
+        imgui.TextWrapped("Пока нет истории по этому предмету. Она появится, когда цену поменяют и сохранят в админке.")
+        return
+    end
+
+    local prices = {}
+    for _, p in ipairs(pts) do prices[#prices + 1] = tonumber(p[3]) or 0 end
+    local n = #prices
+    local first, last = prices[1], prices[n]
+    local rlo, rhi = math.huge, -math.huge
+    for _, v in ipairs(prices) do
+        if v < rlo then rlo = v end
+        if v > rhi then rhi = v end
+    end
+    local pct = first > 0 and (last - first) / first * 100 or 0
+    local good = pct >= 0
+    local cc = good and imgui.ImVec4(0.30, 0.85, 0.45, 1) or imgui.ImVec4(0.95, 0.35, 0.35, 1)
+
+    -- крупная текущая цена и изменение
+    imgui.TextDisabled("Продажа сейчас")
+    imgui.SetWindowFontScale(1.7)
+    imgui.Text(format_price(last))
+    imgui.SetWindowFontScale(1.0)
+    imgui.SameLine()
+    if n > 1 then
+        imgui.TextColored(cc, string.format("%s%.1f%%", good and "+" or "", pct))
+    end
+    imgui.TextDisabled("Минимум " .. format_price(rlo) .. "   Максимум " .. format_price(rhi) .. "   Записей: " .. n)
+    if rhi == rlo and n > 1 then
+        imgui.TextDisabled("Цена за всё время не менялась")
+    end
+    imgui.Spacing()
+
+    -- поле графика
+    local avail = imgui.GetContentRegionAvail()
+    local labelW = 96
+    local W = math.max(120, avail.x - labelW)
+    local H = math.max(200, avail.y - 66)
+    local p0 = imgui.GetCursorScreenPos()
+    local x0, y0 = p0.x + labelW, p0.y + 14
+    local dl = imgui.GetWindowDrawList()
+
+    local lo, hi = rlo, rhi
+    local span = hi - lo
+    if span > 0 then
+        lo, hi = lo - span * 0.15, hi + span * 0.15
+    else
+        -- цена не менялась: ровная линия по центру, шкала вокруг неё
+        lo, hi = rlo * 0.97, rhi * 1.03
+    end
+    local function ypos(v) return y0 + H - (v - lo) / (hi - lo) * H end
+
+    dl:AddRectFilled(imgui.ImVec2(x0, y0), imgui.ImVec2(x0 + W, y0 + H), col32(1, 1, 1, 0.035), 8)
+    for g = 0, 4 do
+        local v = lo + (hi - lo) * g / 4
+        local y = ypos(v)
+        dl:AddLine(imgui.ImVec2(x0, y), imgui.ImVec2(x0 + W, y), col32(1, 1, 1, 0.08), 1)
+        dl:AddText(imgui.ImVec2(p0.x + 2, y - 7), col32(1, 1, 1, 0.55), format_price(v))
+    end
+
+    if n == 1 or span == 0 then
+        local y = ypos(prices[1])
+        dl:AddLine(imgui.ImVec2(x0 + 12, y), imgui.ImVec2(x0 + W - 12, y), col32(0.55, 0.7, 1, 0.9), 2)
+        dl:AddCircleFilled(imgui.ImVec2(x0 + W / 2, y), 6, col32(0.55, 0.7, 1, 1))
+    else
+        local cw = W / n
+        local bw = math.max(8, math.min(cw * 0.6, 28))
+        for i = 1, n do
+            local prev = (i > 1) and prices[i - 1] or prices[i]
+            local cur = prices[i]
+            local cx = x0 + (i - 0.5) * cw
+            local col
+            if i == 1 then
+                col = col32(0.55, 0.7, 1, 0.9)
+            elseif cur >= prev then
+                col = col32(0.30, 0.85, 0.45, 0.95)
+            else
+                col = col32(0.95, 0.35, 0.35, 0.95)
+            end
+            local yTop, yBot = ypos(math.max(prev, cur)), ypos(math.min(prev, cur))
+            dl:AddLine(imgui.ImVec2(cx, yTop - 4), imgui.ImVec2(cx, yBot + 4), col, 2)
+            dl:AddRectFilled(imgui.ImVec2(cx - bw / 2, yTop), imgui.ImVec2(cx + bw / 2, math.max(yBot, yTop + 3)), col, 2)
+        end
+    end
+
+    imgui.Dummy(imgui.ImVec2(avail.x, H + 20))
+    local t1 = math.floor((pts[1][1] or 0) / 1000)
+    local t2 = math.floor((pts[n][1] or 0) / 1000)
+    imgui.TextDisabled(string.rep(" ", 12) .. os.date("%d.%m %H:%M", t1) .. "   ->   " .. os.date("%d.%m %H:%M", t2))
+end
+
+local function draw_chart_frame()
+    local io = imgui.GetIO()
+    imgui.SetNextWindowPos(imgui.ImVec2(io.DisplaySize.x / 2, io.DisplaySize.y / 2), imgui.Cond.Appearing, imgui.ImVec2(0.5, 0.5))
+    if UIFX.chart.focus then
+        imgui.SetNextWindowFocus()
+        UIFX.chart.focus = false
+    end
+    imgui.SetNextWindowSize(imgui.ImVec2(620, 480), imgui.Cond.FirstUseEver)
+    imgui.PushStyleColor(imgui.Col.WindowBg, imgui.ImVec4(0.07, 0.07, 0.09, 1.0))
+    imgui.Begin("График цены##price_chart", UIFX.chart_open)
+    chart_body()
+    imgui.End()
+    imgui.PopStyleColor(1)
+end
+
+imgui.OnFrame(function() return UIFX.chart_open[0] end, guard_frame("chart", draw_chart_frame, function() UIFX.chart_open[0] = false end))
 imgui.OnFrame(function() return outdated_popup[0] end, guard_frame("outdated", function()
     local sw, sh = getScreenResolution()
     imgui.SetNextWindowPos(imgui.ImVec2(sw / 2, sh / 2), imgui.Cond.Always, imgui.ImVec2(0.5, 0.5))
